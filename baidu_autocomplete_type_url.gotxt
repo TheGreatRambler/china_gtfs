@@ -1,0 +1,10 @@
+https://map.baidu.com/su?wd={{.SearchQuery}}
+    &cid=1
+    &type=0
+    &newmap=1
+    &t={{.Timestamp}}
+    &pc_ver=2
+    &qt=sug
+    &auth={{.Auth}}
+    &pcevaname=pc4.1
+    &newfrom=zhuzhan_webmap
