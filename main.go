@@ -97,4 +97,15 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+
+	trips_txt, err := metroman_server.GenerateTripsTXT(TEST_CITY)
+	if err != nil {
+		panic(err)
+	}
+
+	// Write trips.txt to build directory
+	err = os.WriteFile("build/trips.txt", []byte(trips_txt), 0644)
+	if err != nil {
+		panic(err)
+	}
 }

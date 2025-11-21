@@ -27,6 +27,7 @@ type MetromanDate struct {
 }
 
 type MetromanSchedule struct {
+	Code       string
 	DaysOfWeek [7]int
 	Holidays   bool
 }
@@ -93,6 +94,7 @@ type MetromanRoute struct {
 
 	Stations []*MetromanStation
 	Line     *MetromanLine
+	IdxWithinLine int
 	Schedule MetromanSchedule
 }
 
@@ -108,6 +110,7 @@ type MetromanExit struct {
 func OrSchedules(schedules []MetromanSchedule) MetromanSchedule {
 	var out MetromanSchedule
 
+	all_codes := []string{}
 	for _, s := range schedules {
 		// OR each of the 7 days
 		for i := 0; i < 7; i++ {
@@ -118,7 +121,11 @@ func OrSchedules(schedules []MetromanSchedule) MetromanSchedule {
 
 		// OR holidays
 		out.Holidays = out.Holidays || s.Holidays
+
+		all_codes = append(all_codes, s.Code)
 	}
+
+	out.Code = strings.Join(all_codes, "_")
 
 	return out
 }
@@ -329,6 +336,7 @@ func LoadCity(zip_prefix string, payload []byte) (*MetromanCity, error) {
 	way_csv_lines := strings.Split(string(way_csv_contents), "\r\n")
 
 	// Add every station on the route to its list
+	within_line_idx := map[string]int{}
 	for _, way_record_line := range way_csv_lines {
 		way_record := strings.Split(way_record_line, ",")
 
@@ -341,6 +349,8 @@ func LoadCity(zip_prefix string, payload []byte) (*MetromanCity, error) {
 
 		line_idx, _ := strconv.ParseInt(way_record[1], 10, 0)
 		route.Line = lines[line_idx]
+		route.IdxWithinLine = within_line_idx[route.Line.Code]
+		within_line_idx[route.Line.Code]++
 	}
 
 	//spew.Dump(lines_by_code["BJMLSD"])
@@ -455,6 +465,7 @@ func LoadCity(zip_prefix string, payload []byte) (*MetromanCity, error) {
 		}
 
 		schedule_def[schedule_record[0]] = MetromanSchedule{
+			Code:       schedule_record[0],
 			DaysOfWeek: schedule_bits,
 			Holidays:   include_holidays,
 		}
@@ -688,13 +699,25 @@ func (s *MetromanServer) GenerateCalendarTXT(city_code string) (string, string, 
 		"service_id,date,exception_type",
 	}
 
-	for schedule_code, schedule := range city.ScheduleDef {
+	// Find all unique schedules used by routes
+	schedule_added := make(map[string]struct{})
+
+	for _, route := range city.Routes {
+		// Only add new schedules
+		schedule := route.Schedule
+		_, is_schedule_added := schedule_added[schedule.Code]
+		if !is_schedule_added {
+			schedule_added[schedule.Code] = struct{}{}
+		} else {
+			continue
+		}
+
 		any_day_of_week_set := schedule.DaysOfWeek[0] == 1 || schedule.DaysOfWeek[1] == 1 || schedule.DaysOfWeek[2] == 1 || schedule.DaysOfWeek[3] == 1 || schedule.DaysOfWeek[4] == 1 || schedule.DaysOfWeek[5] == 1 || schedule.DaysOfWeek[6] == 1
 
 		// A day of the week must be specified or this must have holidays set (as holidays must still reference a schedule)
 		if any_day_of_week_set || schedule.Holidays {
 			calendar_output = append(calendar_output, fmt.Sprintf("%s,%d,%d,%d,%d,%d,%d,%d,%s,%s",
-				schedule_code,
+				schedule.Code,
 				schedule.DaysOfWeek[0],
 				schedule.DaysOfWeek[1],
 				schedule.DaysOfWeek[2],
@@ -715,7 +738,7 @@ func (s *MetromanServer) GenerateCalendarTXT(city_code string) (string, string, 
 		// Note every single holiday day
 		for _, holiday := range city.Holidays {
 			calendar_dates_output = append(calendar_dates_output, fmt.Sprintf("%s,%s,%d",
-				schedule_code,
+				schedule.Code,
 				fmt.Sprintf("%04d%02d%02d", holiday.Year, holiday.Month, holiday.Day),
 				date_action, // Whether this date was added or not depends on the holiday
 			))
@@ -723,4 +746,31 @@ func (s *MetromanServer) GenerateCalendarTXT(city_code string) (string, string, 
 	}
 
 	return strings.Join(calendar_output, "\n"), strings.Join(calendar_dates_output, "\n"), nil
+}
+
+func (s *MetromanServer) GenerateTripsTXT(city_code string) (string, error) {
+	city, exists := s.Cities[city_code]
+	if !exists {
+		return "", fmt.Errorf("city %v not loaded", city_code)
+	}
+
+	output := []string{
+		"route_id,service_id,trip_id,trip_headsign,direction_id,shape_id",
+	}
+
+	unique_trip_id := 1
+	for _, route := range city.Routes {
+		output = append(output, fmt.Sprintf("%s,%s,%d,%s,%d,%s",
+			route.Code,
+			route.Schedule.Code,
+			unique_trip_id,
+			route.EnglishName,
+			route.IdxWithinLine,
+			route.Code,
+		))
+
+		unique_trip_id++
+	}
+
+	return strings.Join(output, "\n"), nil
 }
