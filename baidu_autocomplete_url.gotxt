@@ -1,0 +1,24 @@
+https://map.baidu.com/?newmap=1
+	&reqflag=pcmap&biz=1
+	&from=webmap
+	&from=webmap
+	&da_par=direct
+	&pcevaname=pc4.1
+	&qt=s
+	&da_src=searchBox.button
+	&wd={{.SearchQuery}}
+	&c=131
+	&src=0
+	&wd2=
+	&pn=0
+	&sug=0
+	&l=19
+	&biz_forward={"scaler":2,"styles":"pl"}
+	&sug_forward=
+	&auth={{.Auth}}
+	&device_ratio=2
+	&tn=B_NORMAL_MAP
+	&nn=0
+	&ie=utf-8
+	&t={{.Timestamp}}
+	&newfrom=zhuzhan_webmap
