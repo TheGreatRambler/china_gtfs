@@ -21,18 +21,23 @@ type MetromanServer struct {
 }
 
 type MetromanCity struct {
-	Lines  []MetromanLine
-	Routes []MetromanRoute
+	Lines  []*MetromanLine
+	Routes []*MetromanRoute
 
 	// Heuristic key for stations is SimplifiedName, will be experimenting
-	StationsByName map[string]MetromanStation
-	StationsByCode map[string]MetromanStation
+	Stations       []*MetromanStation
+	StationsByName map[string]*MetromanStation
+	StationsByCode map[string]*MetromanStation
 
-	StationExitsByCode map[string][]MetromanExit
+	StationExitsByCode map[string][]*MetromanExit
+
+	FareMatrices       []*[][]int
+	FareMatrixStations [][]*MetromanStation
 }
 
 type MetromanStation struct {
-	Code string
+	Code  string
+	Index int // Assigned by us
 
 	EnglishName      string
 	SimplifiedName   string
@@ -60,6 +65,8 @@ type MetromanLine struct {
 	ShortName string
 
 	Color string
+
+	Stations []*MetromanStation
 }
 
 type MetromanRoute struct {
@@ -169,33 +176,40 @@ func LoadCity(zip_prefix string, payload []byte) (*MetromanCity, error) {
 	// Step 1: Create a new zip reader from the []byte data
 	payload_reader, err := zip.NewReader(bytes.NewReader(payload), int64(len(payload)))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("could not open zip reader: %v", err)
 	}
 
-	lines := []MetromanLine{}
-	routes := []MetromanRoute{}
-	stations_by_name := make(map[string]MetromanStation)
-	stations_by_code := make(map[string]MetromanStation)
+	lines := []*MetromanLine{}
+	routes := []*MetromanRoute{}
+	stations := []*MetromanStation{}
+	stations_by_name := make(map[string]*MetromanStation)
+	stations_by_code := make(map[string]*MetromanStation)
+	lines_by_code := make(map[string]*MetromanLine)
+	routes_by_code := make(map[string]*MetromanRoute)
+	fare_matrices := []*[][]int{}
+	fare_matrix_stations := [][]*MetromanStation{}
 
 	// Read in stations/lines first from uno.csv
 	uno_csv_contents, err := ReadFileFromCSV(payload_reader, fmt.Sprintf("%s/uno.csv", zip_prefix))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("could not open uno.csv: %v", err)
 	}
 
 	// Read through the CSV
 	uno_csv_lines := strings.Split(string(uno_csv_contents), "\r\n")
 
+	station_index := 0
 	for _, uno_record_line := range uno_csv_lines {
 		uno_record := strings.Split(uno_record_line, "<,>")
 
 		if uno_record[1] == "MS" {
 			lat_raw, _ := strconv.ParseFloat(uno_record[8], 64)
 			lng_raw, _ := strconv.ParseFloat(uno_record[9], 64)
-			subway_map_x, _ := strconv.ParseInt(uno_record[10], 10, 32)
-			subway_map_y, _ := strconv.ParseInt(uno_record[11], 10, 32)
+			subway_map_x, _ := strconv.ParseInt(uno_record[10], 10, 0)
+			subway_map_y, _ := strconv.ParseInt(uno_record[11], 10, 0)
 			station := MetromanStation{
 				Code:             uno_record[0],
+				Index:            station_index,
 				EnglishName:      uno_record[2],
 				SimplifiedName:   uno_record[3],
 				TraditionalName:  uno_record[4],
@@ -208,11 +222,15 @@ func LoadCity(zip_prefix string, payload []byte) (*MetromanCity, error) {
 				SubwayMapY:       int(subway_map_y),
 			}
 
-			stations_by_name[station.SimplifiedName] = station
-			stations_by_code[station.Code] = station
+			stations = append(stations, &station)
+			stations_by_name[station.SimplifiedName] = &station
+			stations_by_code[station.Code] = &station
+
+			station_index++
 		}
 
-		if uno_record[1] == "ML" {
+		// ML is a metro line, WL is a walking line
+		if uno_record[1] == "ML" || uno_record[1] == "WL" {
 			line := MetromanLine{
 				Code:            uno_record[0],
 				EnglishName:     uno_record[2],
@@ -221,12 +239,15 @@ func LoadCity(zip_prefix string, payload []byte) (*MetromanCity, error) {
 				JapaneseName:    uno_record[5],
 				ShortName:       uno_record[7],
 				Color:           uno_record[12],
+				Stations:        []*MetromanStation{},
 			}
 
-			lines = append(lines, line)
+			lines = append(lines, &line)
+			lines_by_code[line.Code] = &line
 		}
 
-		if uno_record[1] == "MW" {
+		// Metro route and miscellaneous routes (used to specify 2 distinct stations that are connected, hence free to travel between)
+		if uno_record[1] == "MW" || uno_record[1] == "WW" {
 			route := MetromanRoute{
 				Code:            uno_record[0],
 				EnglishName:     uno_record[2],
@@ -235,119 +256,128 @@ func LoadCity(zip_prefix string, payload []byte) (*MetromanCity, error) {
 				JapaneseName:    uno_record[5],
 			}
 
-			routes = append(routes, route)
+			routes = append(routes, &route)
+			routes_by_code[route.Code] = &route
 		}
 	}
 
-	/*
-		// Heuristic to get the likely city prefix (usually just first 3 chars)
-		city_prefix := lines[0].Info.Code[0 : len(lines[0].Info.Code)-3]
+	// Read in stations in line from line.csv
+	line_csv_contents, err := ReadFileFromCSV(payload_reader, fmt.Sprintf("%s/line.csv", zip_prefix))
+	if err != nil {
+		return nil, fmt.Errorf("could not open line.csv: %v", err)
+	}
 
-		// Read in what stations comprise a line
-		line_csv_contents, err := ReadFileFromCSV(payload_reader, fmt.Sprintf("%s/line.csv", zip_prefix))
-		if err != nil {
-			return nil, err
+	// Read through the CSV
+	line_csv_lines := strings.Split(string(line_csv_contents), "\r\n")
+
+	// Add every station on the line to its list
+	for _, line_record_line := range line_csv_lines {
+		line_record := strings.Split(line_record_line, ",")
+
+		line := lines_by_code[line_record[0]]
+		for _, station_idx_str := range line_record[1:] {
+			station_idx, _ := strconv.ParseInt(station_idx_str, 10, 0)
+			line.Stations = append(line.Stations, stations[station_idx])
 		}
+	}
 
-		// Read through the CSV
-		line_csv_lines := strings.Split(string(line_csv_contents), "\r\n")
-		for line_index, line_record_line := range line_csv_lines {
-			// NOTE The line index has the potential to go farther than expected
-			// Appears to be for lines labeled "W", could be monorails or similar
-			// Check later when relevant
-			if line_index >= len(lines) {
-				break
-			}
+	//spew.Dump(lines_by_code["BJMLSD"])
 
-			line_record := strings.Split(line_record_line, ",")
+	// Read in stations/lines from fare.csv (and other files pulled in)
+	fare_csv_contents, err := ReadFileFromCSV(payload_reader, fmt.Sprintf("%s/fare.csv", zip_prefix))
+	if err != nil {
+		return nil, fmt.Errorf("could not open fare.csv: %v", err)
+	}
 
-			// First element is line name (guaranteed to be same order as uno.csv so we don't care)
-			for i := 1; i < len(line_record); i++ {
-				// Get station index as number
-				station_index, err := strconv.Atoi(line_record[i])
-				if err != nil {
-					return nil, err
-				}
+	// Read through the CSV
+	fare_csv_lines := strings.Split(string(fare_csv_contents), "\r\n")
 
-				// Construct station code, should always be 3 digit code (tested with Shanghai)
-				station_code := fmt.Sprintf("%sS%03d", city_prefix, station_index+1)
-				station, ok := stations_by_code[station_code]
-				if !ok {
-					return nil, fmt.Errorf("could not find station listed in line.csv")
-				}
+	for _, fare_record_line := range fare_csv_lines {
+		fare_record := strings.Split(fare_record_line, ",")
 
-				// Append this station to line
-				lines[line_index].Stations = append(lines[line_index].Stations, station)
-				lines[line_index].StationIndex[station_code] = len(lines[line_index].Stations) - 1
-			}
-		}
+		// Fares are assigned per route
+		// TODO currently the lines you take do not factor into price
+		// Every route can only be one with a specific set of lines
+		// if this changes handle that
 
-		// Read in what schedules comprise a line
-		schedule_csv_contents, err := ReadFileFromCSV(payload_reader, fmt.Sprintf("%s/wayschedule.csv", zip_prefix))
-		if err != nil {
-			return nil, err
-		}
+		// TODO if there are no stations listed this applies to every station in the line
+		station_codes := strings.Split(fare_record[4], "|")
+		stations := []*MetromanStation{}
+		if len(station_codes) == 1 && station_codes[0] == "" {
+			// Get stations from line
+			// TODO very rigid approach to ascertain line from directional route
+			line_code := []rune(fare_record[1][:6])
+			line_code[3] = 'L'
 
-		// Read what schedules comprise a line
-		schedule_csv_lines := strings.Split(string(schedule_csv_contents), "\r\n")
-		schedule_line_index := 0
-		for _, schedule_record_line := range schedule_csv_lines {
-			schedule_record := strings.Split(schedule_record_line, ",")
-
-			// Only include the 'A' lines, once again just for now
-			if (schedule_record[0][len(schedule_record[0])-1]) == 'A' {
-				if schedule_line_index >= len(lines) {
-					break
-				}
-
-				lines[schedule_line_index].Schedules = schedule_record[2:]
-
-				schedule_line_index++
+			stations = lines_by_code[string(line_code)].Stations
+		} else {
+			for _, station_code := range station_codes {
+				stations = append(stations, stations_by_code[station_code])
 			}
 		}
 
-		// Add down and up times to line
-		for i, line := range lines {
-			// Some lines only go one direction, like BJMWSDA (Capital Airport Express) (Beijing)
-			// Handle that by ignoring errors here
-			down_times, err := HandleStationTimes(zip_prefix, payload_reader, line.Down.Code)
+		// Create 2D fare matrix. First index is start, second is end
+		fare_matrix := [][]int{}
+
+		if len(fare_record[3]) > 0 {
+			fare_matrix, err = CSVToMatrixInt(payload_reader, fmt.Sprintf("%s/%s", zip_prefix, fare_record[3]))
 			if err != nil {
-				return nil, err
+				return nil, fmt.Errorf("could not open %s: %v", fare_record[3], err)
+			}
+		} else {
+			// All the station pairs have the same fixed price
+			fixed_price, _ := strconv.ParseInt(fare_record[2], 10, 0)
+
+			for i := 0; i < len(stations); i++ {
+				fare_matrix = append(fare_matrix, make([]int, len(stations)))
 			}
 
-			if len(down_times) > 0 {
-				// Split down the middle for weekday and holiday (presumed split)
-				lines[i].WeekdayDownTimes = down_times[:len(down_times)/len(line.Schedules)]
-				//lines[i].HolidayDownTimes = down_times[len(down_times)/2:]
-
-				// Calculate when trains were added
-				lines[i].WeekdayDownTimesAddedTrain = GetTrainsAdded(lines[i].WeekdayDownTimes, false)
-				//lines[i].HolidayDownTimesAddedTrain = GetTrainsAdded(lines[i].HolidayDownTimes, false)
-			}
-
-			up_times, err := HandleStationTimes(zip_prefix, payload_reader, line.Up.Code)
-			if err != nil {
-				return nil, err
-			}
-
-			if len(up_times) > 0 {
-				// Split down the middle for weekday and holiday (presumed split)
-				lines[i].WeekdayUpTimes = up_times[:len(up_times)/len(line.Schedules)]
-				//lines[i].HolidayUpTimes = up_times[len(up_times)/2:]
-
-				// Calculate when trains were added
-				lines[i].WeekdayUpTimesAddedTrain = GetTrainsAdded(lines[i].WeekdayUpTimes, true)
-				//lines[i].HolidayUpTimesAddedTrain = GetTrainsAdded(lines[i].HolidayUpTimes, true)
+			for x, _ := range stations {
+				for y, _ := range stations {
+					fare_matrix[x][y] = int(fixed_price)
+				}
 			}
 		}
-	*/
+
+		//routes := strings.Split(fare_record[1], "|")
+
+		fare_matrices = append(fare_matrices, &fare_matrix)
+		fare_matrix_stations = append(fare_matrix_stations, stations)
+	}
 
 	return &MetromanCity{
-		Lines:          lines,
-		Routes:         routes,
-		StationsByName: stations_by_name,
-		StationsByCode: stations_by_code,
+		Lines:              lines,
+		Routes:             routes,
+		Stations:           stations,
+		StationsByName:     stations_by_name,
+		StationsByCode:     stations_by_code,
+		FareMatrices:       fare_matrices,
+		FareMatrixStations: fare_matrix_stations,
 	}, nil
+}
+
+func CSVToMatrixInt(payload_reader *zip.Reader, filename string) ([][]int, error) {
+	matrix_csv_contents, err := ReadFileFromCSV(payload_reader, filename)
+	if err != nil {
+		return nil, err
+	}
+
+	// Read through the CSV
+	matrix_csv_lines := strings.Split(string(matrix_csv_contents), "\r\n")
+	output_matrix := [][]int{}
+	for _, matrix_record_line := range matrix_csv_lines {
+		matrix_record := strings.Split(matrix_record_line, ",")
+
+		output_line := make([]int, len(matrix_record))
+		for i, elem := range matrix_record {
+			elem_64, _ := strconv.ParseInt(elem, 10, 0)
+			output_line[i] = int(elem_64)
+		}
+
+		output_matrix = append(output_matrix, output_line)
+	}
+
+	return output_matrix, nil
 }
 
 func (s *MetromanServer) GenerateStopsTXT(code string, full bool) (string, error) {
@@ -405,12 +435,13 @@ func (s *MetromanServer) GenerateStopsTXT(code string, full bool) (string, error
 			}
 		}
 
-		output = append(output, fmt.Sprintf("%s,%s,%s,,,%f,%f,,%s,%d,,%s,%d,,,",
+		output = append(output, fmt.Sprintf("%s,%s,%s,,,%f,%f,%s,%s,%d,,%s,%d,,,",
 			station_code,           // Potentially internal to MetroMan
 			station.SimplifiedName, // Potentially not true for cities other than Beijing
 			station.EnglishName,    // China likely defaults to the Chinese name for all public comms, we'll use English for now though
 			corrected_coord.Lat,
 			corrected_coord.Lng,
+			fmt.Sprintf("zone_%s", station_code), // Peculiarly of GTFS: fares cannot be specified by distance, this must be done instead
 			url,
 			1,
 			"Asia/Shanghai",
@@ -421,4 +452,53 @@ func (s *MetromanServer) GenerateStopsTXT(code string, full bool) (string, error
 	}
 
 	return strings.Join(output, "\n"), nil
+}
+
+func (s *MetromanServer) GenerateFaresTXT(code string, full bool) (string, string, error) {
+	city, exists := s.Cities[code]
+	if !exists {
+		return "", "", fmt.Errorf("city %v not loaded", code)
+	}
+
+	// You pay 3 generally if you enter and exit the subway: https://www.reddit.com/r/shanghai/comments/18lrq74/enter_exit_same_metro_station_what_happens/
+
+	// Will be using GTFS fares v1 and generating every station to station pair in one direction
+	// TODO only do one direction optimization if the fare matrix is mirrored, for now assuming it
+
+	// First generate fare_rules.txt
+	rules_output := []string{
+		"fare_id,route_id,origin_id,destination_id,contains_id",
+	}
+	attributes_output := []string{
+		"fare_id,price,currency_type,payment_method,transfers,agency_id,transfer_duration",
+	}
+
+	for i, fare_matrix_stations := range city.FareMatrixStations {
+		for x, start_station := range fare_matrix_stations {
+			for y, end_station := range fare_matrix_stations {
+
+				// I am allowing ALL station pairs so transit apps don't choke
+				// if end_station.Index >= start_station.Index
+
+				rules_output = append(rules_output, fmt.Sprintf("fare_%s_%s,,zone_%s,zone_%s,",
+					city.Stations[start_station.Index].Code,
+					city.Stations[end_station.Index].Code,
+					city.Stations[start_station.Index].Code,
+					city.Stations[end_station.Index].Code,
+				))
+
+				attributes_output = append(attributes_output, fmt.Sprintf("fare_%s_%s,%d,%s,%d,%d,,",
+					city.Stations[start_station.Index].Code,
+					city.Stations[end_station.Index].Code,
+					(*city.FareMatrices[i])[x][y],
+					"CNY",
+					1,
+					0,
+				))
+			}
+		}
+	}
+
+	return strings.Join(rules_output, "\n"),
+		strings.Join(attributes_output, "\n"), nil
 }
