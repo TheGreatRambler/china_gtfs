@@ -20,6 +20,17 @@ type MetromanServer struct {
 	BaiduServer *baidu_client.BaiduServer
 }
 
+type MetromanDate struct {
+	Year  int
+	Month int
+	Day   int
+}
+
+type MetromanSchedule struct {
+	DaysOfWeek [7]int
+	Holidays   bool
+}
+
 type MetromanCity struct {
 	Lines  []*MetromanLine
 	Routes []*MetromanRoute
@@ -33,6 +44,9 @@ type MetromanCity struct {
 
 	FareMatrices       []*[][]int
 	FareMatrixStations [][]*MetromanStation
+
+	Holidays    []MetromanDate
+	ScheduleDef map[string]MetromanSchedule
 }
 
 type MetromanStation struct {
@@ -76,6 +90,10 @@ type MetromanRoute struct {
 	SimplifiedName  string
 	TraditionalName string
 	JapaneseName    string
+
+	Stations []*MetromanStation
+	Line     *MetromanLine
+	Schedule MetromanSchedule
 }
 
 // Exits include toilets, may exclude outright for now
@@ -84,6 +102,25 @@ type MetromanExit struct {
 
 	SimplifiedName        string
 	SimplifiedDescription string
+}
+
+// Used to get the combined schedules of routes
+func OrSchedules(schedules []MetromanSchedule) MetromanSchedule {
+	var out MetromanSchedule
+
+	for _, s := range schedules {
+		// OR each of the 7 days
+		for i := 0; i < 7; i++ {
+			if s.DaysOfWeek[i] == 1 {
+				out.DaysOfWeek[i] = 1
+			}
+		}
+
+		// OR holidays
+		out.Holidays = out.Holidays || s.Holidays
+	}
+
+	return out
 }
 
 func ReadFileFromCSV(zip_reader *zip.Reader, name string) ([]byte, error) {
@@ -188,6 +225,7 @@ func LoadCity(zip_prefix string, payload []byte) (*MetromanCity, error) {
 	routes_by_code := make(map[string]*MetromanRoute)
 	fare_matrices := []*[][]int{}
 	fare_matrix_stations := [][]*MetromanStation{}
+	holidays := []MetromanDate{}
 
 	// Read in stations/lines first from uno.csv
 	uno_csv_contents, err := ReadFileFromCSV(payload_reader, fmt.Sprintf("%s/uno.csv", zip_prefix))
@@ -281,6 +319,30 @@ func LoadCity(zip_prefix string, payload []byte) (*MetromanCity, error) {
 		}
 	}
 
+	// Read in stations in line from way.csv (the "line.csv" of routes)
+	way_csv_contents, err := ReadFileFromCSV(payload_reader, fmt.Sprintf("%s/way.csv", zip_prefix))
+	if err != nil {
+		return nil, fmt.Errorf("could not open way.csv: %v", err)
+	}
+
+	// Read through the CSV
+	way_csv_lines := strings.Split(string(way_csv_contents), "\r\n")
+
+	// Add every station on the route to its list
+	for _, way_record_line := range way_csv_lines {
+		way_record := strings.Split(way_record_line, ",")
+
+		route := routes_by_code[way_record[0]]
+
+		for _, station_idx_str := range way_record[3:] {
+			station_idx, _ := strconv.ParseInt(station_idx_str, 10, 0)
+			route.Stations = append(route.Stations, stations[station_idx])
+		}
+
+		line_idx, _ := strconv.ParseInt(way_record[1], 10, 0)
+		route.Line = lines[line_idx]
+	}
+
 	//spew.Dump(lines_by_code["BJMLSD"])
 
 	// Read in stations/lines from fare.csv (and other files pulled in)
@@ -297,19 +359,14 @@ func LoadCity(zip_prefix string, payload []byte) (*MetromanCity, error) {
 
 		// Fares are assigned per route
 		// TODO currently the lines you take do not factor into price
-		// Every route can only be one with a specific set of lines
+		// Every route can only be done with a specific set of lines
 		// if this changes handle that
 
-		// TODO if there are no stations listed this applies to every station in the line
 		station_codes := strings.Split(fare_record[4], "|")
 		stations := []*MetromanStation{}
 		if len(station_codes) == 1 && station_codes[0] == "" {
-			// Get stations from line
-			// TODO very rigid approach to ascertain line from directional route
-			line_code := []rune(fare_record[1][:6])
-			line_code[3] = 'L'
-
-			stations = lines_by_code[string(line_code)].Stations
+			// Get stations from route
+			stations = routes_by_code[fare_record[1]].Stations
 		} else {
 			for _, station_code := range station_codes {
 				stations = append(stations, stations_by_code[station_code])
@@ -345,6 +402,86 @@ func LoadCity(zip_prefix string, payload []byte) (*MetromanCity, error) {
 		fare_matrix_stations = append(fare_matrix_stations, stations)
 	}
 
+	// Read in holidays
+	holiday_csv_contents, err := ReadFileFromCSV(payload_reader, fmt.Sprintf("%s/holiday.csv", zip_prefix))
+	if err != nil {
+		return nil, fmt.Errorf("could not open holiday.csv: %v", err)
+	}
+
+	// Read through the CSV
+	holiday_csv_lines := strings.Split(string(holiday_csv_contents), "\r\n")
+
+	// Add every station on the route to its list
+	for _, holiday_record_line := range holiday_csv_lines {
+		// Just 1 column
+		year, _ := strconv.ParseInt(holiday_record_line[0:4], 10, 0)
+		month, _ := strconv.ParseInt(holiday_record_line[4:6], 10, 0)
+		day, _ := strconv.ParseInt(holiday_record_line[6:8], 10, 0)
+		holidays = append(holidays, MetromanDate{
+			Year:  int(year),
+			Month: int(month),
+			Day:   int(day),
+		})
+	}
+
+	schedule_def := make(map[string]MetromanSchedule)
+
+	// Read in schedule definitions
+	schedule_csv_contents, err := ReadFileFromCSV(payload_reader, fmt.Sprintf("%s/schedule.csv", zip_prefix))
+	if err != nil {
+		return nil, fmt.Errorf("could not open schedule.csv: %v", err)
+	}
+
+	// Read through the CSV
+	schedule_csv_lines := strings.Split(string(schedule_csv_contents), "\r\n")
+
+	// Add the schedules for each route
+	for _, schedule_record_line := range schedule_csv_lines {
+		schedule_record := strings.Split(schedule_record_line, "<,>")
+
+		schedule_bits := [7]int{}
+		for i, bit_str := range schedule_record[1:8] {
+			if bit_str[0] == '1' {
+				schedule_bits[i] = 1
+			} else {
+				schedule_bits[i] = 0
+			}
+		}
+
+		// TODO whether weekdays-friday and friday are included is also specified
+		include_holidays := false
+		if schedule_record[9][0] == '1' {
+			include_holidays = true
+		}
+
+		schedule_def[schedule_record[0]] = MetromanSchedule{
+			DaysOfWeek: schedule_bits,
+			Holidays:   include_holidays,
+		}
+	}
+
+	// Read in schedules for routes
+	wayschedule_csv_contents, err := ReadFileFromCSV(payload_reader, fmt.Sprintf("%s/wayschedule.csv", zip_prefix))
+	if err != nil {
+		return nil, fmt.Errorf("could not open wayschedule.csv: %v", err)
+	}
+
+	// Read through the CSV
+	wayschedule_csv_lines := strings.Split(string(wayschedule_csv_contents), "\r\n")
+
+	// Add the schedules for each route
+	for _, wayschedule_record_line := range wayschedule_csv_lines {
+		wayschedule_record := strings.Split(wayschedule_record_line, ",")
+
+		schedules := []MetromanSchedule{}
+		for _, schedule_code := range wayschedule_record[2:] {
+			schedules = append(schedules, schedule_def[schedule_code])
+		}
+
+		// Combine all schedules together
+		routes_by_code[wayschedule_record[0]].Schedule = OrSchedules(schedules)
+	}
+
 	return &MetromanCity{
 		Lines:              lines,
 		Routes:             routes,
@@ -353,6 +490,8 @@ func LoadCity(zip_prefix string, payload []byte) (*MetromanCity, error) {
 		StationsByCode:     stations_by_code,
 		FareMatrices:       fare_matrices,
 		FareMatrixStations: fare_matrix_stations,
+		Holidays:           holidays,
+		ScheduleDef:        schedule_def,
 	}, nil
 }
 
@@ -476,7 +615,6 @@ func (s *MetromanServer) GenerateFaresTXT(code string, full bool) (string, strin
 	for i, fare_matrix_stations := range city.FareMatrixStations {
 		for x, start_station := range fare_matrix_stations {
 			for y, end_station := range fare_matrix_stations {
-
 				// I am allowing ALL station pairs so transit apps don't choke
 				// if end_station.Index >= start_station.Index
 
@@ -501,4 +639,38 @@ func (s *MetromanServer) GenerateFaresTXT(code string, full bool) (string, strin
 
 	return strings.Join(rules_output, "\n"),
 		strings.Join(attributes_output, "\n"), nil
+}
+
+func (s *MetromanServer) GenerateAgencyTXT(code string) string {
+	output := []string{
+		"agency_id,agency_name,agency_url,agency_timezone,agency_lang,agency_phone",
+		fmt.Sprintf("%s,MetroMan-GTFS %s,,%s,%s,", code, code, "Asia/Shanghai", "zh"),
+	}
+
+	return strings.Join(output, "\n")
+}
+
+func (s *MetromanServer) GenerateRoutesTXT(city_code string) (string, error) {
+	city, exists := s.Cities[city_code]
+	if !exists {
+		return "", fmt.Errorf("city %v not loaded", city_code)
+	}
+
+	output := []string{
+		"agency_id,route_id,route_short_name,route_long_name,route_type,route_url,route_color,route_text_color",
+	}
+
+	for _, route := range city.Routes {
+		output = append(output, fmt.Sprintf("%s,%s,,%s,%d,%s,%s,%s",
+			city_code,
+			route.Code,
+			route.EnglishName,
+			2,  // https://gtfs.org/documentation/schedule/reference/#routestxt
+			"", // No URL YET
+			route.Line.Color,
+			"#000000",
+		))
+	}
+
+	return strings.Join(output, "\n"), nil
 }
