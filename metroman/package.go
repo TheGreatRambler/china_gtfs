@@ -674,3 +674,53 @@ func (s *MetromanServer) GenerateRoutesTXT(city_code string) (string, error) {
 
 	return strings.Join(output, "\n"), nil
 }
+
+func (s *MetromanServer) GenerateCalendarTXT(city_code string) (string, string, error) {
+	city, exists := s.Cities[city_code]
+	if !exists {
+		return "", "", fmt.Errorf("city %v not loaded", city_code)
+	}
+
+	calendar_output := []string{
+		"service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date",
+	}
+	calendar_dates_output := []string{
+		"service_id,date,exception_type",
+	}
+
+	for schedule_code, schedule := range city.ScheduleDef {
+		any_day_of_week_set := schedule.DaysOfWeek[0] == 1 || schedule.DaysOfWeek[1] == 1 || schedule.DaysOfWeek[2] == 1 || schedule.DaysOfWeek[3] == 1 || schedule.DaysOfWeek[4] == 1 || schedule.DaysOfWeek[5] == 1 || schedule.DaysOfWeek[6] == 1
+
+		// A day of the week must be specified or this must have holidays set (as holidays must still reference a schedule)
+		if any_day_of_week_set || schedule.Holidays {
+			calendar_output = append(calendar_output, fmt.Sprintf("%s,%d,%d,%d,%d,%d,%d,%d,%s,%s",
+				schedule_code,
+				schedule.DaysOfWeek[0],
+				schedule.DaysOfWeek[1],
+				schedule.DaysOfWeek[2],
+				schedule.DaysOfWeek[3],
+				schedule.DaysOfWeek[4],
+				schedule.DaysOfWeek[5],
+				schedule.DaysOfWeek[6],
+				fmt.Sprintf("%04d%02d%02d", 2000, 1, 1),   // Day in the past
+				fmt.Sprintf("%04d%02d%02d", 9999, 12, 31), // Day in the future
+			))
+		}
+
+		date_action := 2 // Remove the date
+		if schedule.Holidays {
+			date_action = 1 // Add the date
+		}
+
+		// Note every single holiday day
+		for _, holiday := range city.Holidays {
+			calendar_dates_output = append(calendar_dates_output, fmt.Sprintf("%s,%s,%d",
+				schedule_code,
+				fmt.Sprintf("%04d%02d%02d", holiday.Year, holiday.Month, holiday.Day),
+				date_action, // Whether this date was added or not depends on the holiday
+			))
+		}
+	}
+
+	return strings.Join(calendar_output, "\n"), strings.Join(calendar_dates_output, "\n"), nil
+}

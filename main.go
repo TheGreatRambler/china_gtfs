@@ -60,4 +60,41 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+
+	// For now effectively hardcoded
+	agency_txt := metroman_server.GenerateAgencyTXT(TEST_CITY)
+
+	// Write agency.txt to build directory
+	err = os.WriteFile("build/agency.txt", []byte(agency_txt), 0644)
+	if err != nil {
+		panic(err)
+	}
+
+	routes_txt, err := metroman_server.GenerateRoutesTXT(TEST_CITY)
+	if err != nil {
+		panic(err)
+	}
+
+	// Write routes.txt to build directory
+	err = os.WriteFile("build/routes.txt", []byte(routes_txt), 0644)
+	if err != nil {
+		panic(err)
+	}
+
+	calendar_txt, calendar_dates_txt, err := metroman_server.GenerateCalendarTXT(TEST_CITY)
+	if err != nil {
+		panic(err)
+	}
+
+	// Write calendar.txt to build directory
+	err = os.WriteFile("build/calendar.txt", []byte(calendar_txt), 0644)
+	if err != nil {
+		panic(err)
+	}
+
+	// Write calendar_dates.txt to build directory
+	err = os.WriteFile("build/calendar_dates.txt", []byte(calendar_dates_txt), 0644)
+	if err != nil {
+		panic(err)
+	}
 }
