@@ -108,4 +108,26 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+
+	shapes_txt, err := metroman_server.GenerateShapesTXT(TEST_CITY)
+	if err != nil {
+		panic(err)
+	}
+
+	// Write shapes.txt to build directory
+	err = os.WriteFile("build/shapes.txt", []byte(shapes_txt), 0644)
+	if err != nil {
+		panic(err)
+	}
+
+	stop_times_txt, err := metroman_server.GenerateStopTimesTXT(TEST_CITY)
+	if err != nil {
+		panic(err)
+	}
+
+	// Write stop_times.txt to build directory
+	err = os.WriteFile("build/stop_times.txt", []byte(stop_times_txt), 0644)
+	if err != nil {
+		panic(err)
+	}
 }

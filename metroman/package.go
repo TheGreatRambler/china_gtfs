@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -47,7 +48,7 @@ type MetromanCity struct {
 	FareMatrixStations [][]*MetromanStation
 
 	Holidays    []MetromanDate
-	ScheduleDef map[string]MetromanSchedule
+	ScheduleDef map[string]*MetromanSchedule
 }
 
 type MetromanStation struct {
@@ -92,10 +93,22 @@ type MetromanRoute struct {
 	TraditionalName string
 	JapaneseName    string
 
-	Stations []*MetromanStation
-	Line     *MetromanLine
+	Stations      []*MetromanStation
+	Line          *MetromanLine
 	IdxWithinLine int
-	Schedule MetromanSchedule
+	Schedules     []*MetromanSchedule
+	Trips         [][]MetromanTrip // Set of trips for each schedule
+}
+
+type MetromanTrip struct {
+	TripEnded bool
+	Visits    []MetromanStationVisit
+}
+
+type MetromanStationVisit struct {
+	Station            *MetromanStation
+	DepartureMinutes   int
+	NextArrivalMinutes int
 }
 
 // Exits include toilets, may exclude outright for now
@@ -107,6 +120,7 @@ type MetromanExit struct {
 }
 
 // Used to get the combined schedules of routes
+/*
 func OrSchedules(schedules []MetromanSchedule) MetromanSchedule {
 	var out MetromanSchedule
 
@@ -129,6 +143,7 @@ func OrSchedules(schedules []MetromanSchedule) MetromanSchedule {
 
 	return out
 }
+*/
 
 func ReadFileFromCSV(zip_reader *zip.Reader, name string) ([]byte, error) {
 	var chosen_file *zip.File
@@ -137,6 +152,10 @@ func ReadFileFromCSV(zip_reader *zip.Reader, name string) ([]byte, error) {
 			chosen_file = file
 			break
 		}
+	}
+
+	if chosen_file == nil {
+		return []byte{}, fmt.Errorf("could not find file %s in zip", name)
 	}
 
 	opened_file, err := chosen_file.Open()
@@ -252,6 +271,12 @@ func LoadCity(zip_prefix string, payload []byte) (*MetromanCity, error) {
 			lng_raw, _ := strconv.ParseFloat(uno_record[9], 64)
 			subway_map_x, _ := strconv.ParseInt(uno_record[10], 10, 0)
 			subway_map_y, _ := strconv.ParseInt(uno_record[11], 10, 0)
+
+			corrected_coord := GCJ02ToWGS84(Coordinate{
+				Lat: lat_raw,
+				Lng: lng_raw,
+			})
+
 			station := MetromanStation{
 				Code:             uno_record[0],
 				Index:            station_index,
@@ -261,8 +286,8 @@ func LoadCity(zip_prefix string, payload []byte) (*MetromanCity, error) {
 				JapaneseName:     uno_record[5],
 				EnglishShortName: uno_record[6],
 				ShortName:        uno_record[7],
-				Lat:              lat_raw,
-				Lng:              lng_raw,
+				Lat:              corrected_coord.Lat,
+				Lng:              corrected_coord.Lng,
 				SubwayMapX:       int(subway_map_x),
 				SubwayMapY:       int(subway_map_y),
 			}
@@ -434,7 +459,7 @@ func LoadCity(zip_prefix string, payload []byte) (*MetromanCity, error) {
 		})
 	}
 
-	schedule_def := make(map[string]MetromanSchedule)
+	schedule_def := make(map[string]*MetromanSchedule)
 
 	// Read in schedule definitions
 	schedule_csv_contents, err := ReadFileFromCSV(payload_reader, fmt.Sprintf("%s/schedule.csv", zip_prefix))
@@ -464,7 +489,7 @@ func LoadCity(zip_prefix string, payload []byte) (*MetromanCity, error) {
 			include_holidays = true
 		}
 
-		schedule_def[schedule_record[0]] = MetromanSchedule{
+		schedule_def[schedule_record[0]] = &MetromanSchedule{
 			Code:       schedule_record[0],
 			DaysOfWeek: schedule_bits,
 			Holidays:   include_holidays,
@@ -484,13 +509,166 @@ func LoadCity(zip_prefix string, payload []byte) (*MetromanCity, error) {
 	for _, wayschedule_record_line := range wayschedule_csv_lines {
 		wayschedule_record := strings.Split(wayschedule_record_line, ",")
 
-		schedules := []MetromanSchedule{}
+		schedules := []*MetromanSchedule{}
 		for _, schedule_code := range wayschedule_record[2:] {
 			schedules = append(schedules, schedule_def[schedule_code])
 		}
 
-		// Combine all schedules together
-		routes_by_code[wayschedule_record[0]].Schedule = OrSchedules(schedules)
+		routes_by_code[wayschedule_record[0]].Schedules = schedules
+	}
+
+	// Read in schedules for every route
+	for _, route := range routes {
+		// Read in visit times for route
+		schedule_csv_contents, err := ReadFileFromCSV(payload_reader, fmt.Sprintf("%s/%s.csv", zip_prefix, route.Code))
+		if err != nil {
+			// Some files like the walking routes don't exist, just ignore
+			continue
+		}
+
+		// Read through the CSV
+		schedule_csv_lines := strings.Split(string(schedule_csv_contents), "\r\n")
+
+		// The format is as thus:
+		//     The numbers will be increasing until a certain point,
+		//         at which point they return to close to the beginning
+		//     That block of times represents all of the departure,arrival pairs of the first and second station
+		//     It seems safe to assume atm that the arrival and departure times of a
+		//         particular station are always the same
+		//     IMPORTANT: Subsequent stations may add their own trips to the route, meaning there are more trips
+		//         than just those starting at the first station
+
+		trips_by_schedule := [][]MetromanTrip{}
+		station_arrivals_departures := [][]map[int]int{}
+
+		// Will read file into here then parse
+		// map is arrival_next -> departure
+		current_station_arrivals_departures := []map[int]int{make(map[int]int)}
+		station_idx := 0
+		last_depart_min := 0
+		for schedule_record_line_idx, schedule_record_line := range schedule_csv_lines {
+			schedule_record := strings.Split(schedule_record_line, ",")
+
+			depart_min, _ := strconv.ParseInt(schedule_record[0], 10, 0)
+			arrive_next_min, _ := strconv.ParseInt(schedule_record[1], 10, 0)
+
+			if int(depart_min) < last_depart_min {
+				if len(current_station_arrivals_departures) == len(route.Stations)-1 {
+					// A set of trips exists for this schedule. We have reached a new schedule
+					// Save this one, clear and reset
+					station_arrivals_departures = append(station_arrivals_departures,
+						current_station_arrivals_departures)
+
+					station_idx = 0
+					current_station_arrivals_departures = []map[int]int{make(map[int]int)}
+				} else {
+					station_idx++
+					current_station_arrivals_departures = append(current_station_arrivals_departures,
+						make(map[int]int))
+				}
+			}
+
+			current_station_arrivals_departures[station_idx][int(arrive_next_min)] = int(depart_min)
+			last_depart_min = int(depart_min)
+
+			// If we're the last one add the current map
+			if schedule_record_line_idx == len(schedule_csv_lines)-1 {
+				station_arrivals_departures = append(station_arrivals_departures,
+					current_station_arrivals_departures)
+			}
+		}
+
+		//if route_idx == 0 {
+		//	data, _ := json.MarshalIndent(current_station_arrivals_departures, "", "  ")
+		//	os.WriteFile("route_1_groups.json", data, 0644)
+		//}
+
+		for _, current_station_arrivals_departures := range station_arrivals_departures {
+			// Now determine trips from this
+			trips := []MetromanTrip{}
+			arrival_trip_assigned := make(map[int]int)      // Arrival at next station to trip index (the trips array above)
+			last_arrival_trip_assigned := make(map[int]int) // Same as above but for the last station. Will rotate these out and clear current at the end of each station
+
+			for station_idx, arrivals_departures_map := range current_station_arrivals_departures {
+				// Sweep over trips and note which are blacklisted (they have ended)
+				trip_ended := make(map[int]bool)
+				for trip_idx, trip := range trips {
+					trip_ended[trip_idx] = trip.TripEnded
+				}
+
+				// Now tentatively note them as ended. This flag will be reverted if that is not true
+				for _, trip := range trips {
+					trip.TripEnded = true
+				}
+
+				if station_idx == 0 {
+					// We are going to iterate over the map. Not ordered, but doesn't matter too much
+					for arrival_next_min, depart_min := range arrivals_departures_map {
+						// Always creates new trips
+						trips = append(trips, MetromanTrip{
+							TripEnded: false,
+							Visits: []MetromanStationVisit{MetromanStationVisit{
+								Station:            route.Stations[0],
+								DepartureMinutes:   depart_min,
+								NextArrivalMinutes: arrival_next_min,
+							}},
+						})
+
+						// Lookup for the next station
+						arrival_trip_assigned[arrival_next_min] = len(trips) - 1
+					}
+				} else {
+					// Rotate trip assigned map and clear current
+					last_arrival_trip_assigned = arrival_trip_assigned
+					arrival_trip_assigned = make(map[int]int)
+
+					for arrival_next_min, depart_min := range arrivals_departures_map {
+						trip_idx, trip_found := last_arrival_trip_assigned[depart_min]
+						if trip_found && !trip_ended[trip_idx] {
+							// Add to existing trip
+							trips[trip_idx].Visits = append(trips[trip_idx].Visits, MetromanStationVisit{
+								Station:            route.Stations[station_idx],
+								DepartureMinutes:   depart_min,
+								NextArrivalMinutes: arrival_next_min,
+							})
+							trips[trip_idx].TripEnded = false
+
+							// Note down the trip index again
+							arrival_trip_assigned[arrival_next_min] = trip_idx
+						} else {
+							// Need to create a new trip
+							trips = append(trips, MetromanTrip{
+								TripEnded: false,
+								Visits: []MetromanStationVisit{MetromanStationVisit{
+									Station:            route.Stations[station_idx],
+									DepartureMinutes:   depart_min,
+									NextArrivalMinutes: arrival_next_min,
+								}},
+							})
+
+							// Lookup for the next station
+							arrival_trip_assigned[arrival_next_min] = len(trips) - 1
+							trip_idx = len(trips) - 1
+						}
+
+						if station_idx == len(route.Stations)-2 && !trip_ended[trip_idx] {
+							// The last station is determined by the arrival time of the second to last
+							trips[trip_idx].Visits = append(trips[trip_idx].Visits, MetromanStationVisit{
+								Station:            route.Stations[len(route.Stations)-1],
+								DepartureMinutes:   arrival_next_min,
+								NextArrivalMinutes: -1,
+							})
+							trips[trip_idx].TripEnded = true
+						}
+					}
+				}
+			}
+
+			trips_by_schedule = append(trips_by_schedule, trips)
+		}
+
+		// Finally add it
+		route.Trips = trips_by_schedule
 	}
 
 	return &MetromanCity{
@@ -544,11 +722,6 @@ func (s *MetromanServer) GenerateStopsTXT(code string, full bool) (string, error
 	}
 
 	for station_code, station := range city.StationsByCode {
-		corrected_coord := GCJ02ToWGS84(Coordinate{
-			Lat: station.Lat,
-			Lng: station.Lng,
-		})
-
 		url := ""
 		use_autocomplete_fallback := false
 
@@ -589,11 +762,11 @@ func (s *MetromanServer) GenerateStopsTXT(code string, full bool) (string, error
 			station_code,           // Potentially internal to MetroMan
 			station.SimplifiedName, // Potentially not true for cities other than Beijing
 			station.EnglishName,    // China likely defaults to the Chinese name for all public comms, we'll use English for now though
-			corrected_coord.Lat,
-			corrected_coord.Lng,
+			station.Lat,
+			station.Lng,
 			fmt.Sprintf("zone_%s", station_code), // Peculiarly of GTFS: fares cannot be specified by distance, this must be done instead
 			url,
-			1,
+			0,
 			"Asia/Shanghai",
 			0,
 		))
@@ -655,7 +828,7 @@ func (s *MetromanServer) GenerateFaresTXT(code string, full bool) (string, strin
 func (s *MetromanServer) GenerateAgencyTXT(code string) string {
 	output := []string{
 		"agency_id,agency_name,agency_url,agency_timezone,agency_lang,agency_phone",
-		fmt.Sprintf("%s,MetroMan-GTFS %s,,%s,%s,", code, code, "Asia/Shanghai", "zh"),
+		fmt.Sprintf("%s,MetroMan-GTFS %s,%s,%s,%s,", code, code, "https://tgrcode.com/", "Asia/Shanghai", "zh"),
 	}
 
 	return strings.Join(output, "\n")
@@ -672,14 +845,21 @@ func (s *MetromanServer) GenerateRoutesTXT(city_code string) (string, error) {
 	}
 
 	for _, route := range city.Routes {
-		output = append(output, fmt.Sprintf("%s,%s,,%s,%d,%s,%s,%s",
+		// No hashtag in color
+		color := ""
+		if len(route.Line.Color) > 0 {
+			color = route.Line.Color[1:]
+		}
+
+		output = append(output, fmt.Sprintf("%s,%s,%s,%s,%d,%s,%s,%s",
 			city_code,
 			route.Code,
+			route.SimplifiedName,
 			route.EnglishName,
 			2,  // https://gtfs.org/documentation/schedule/reference/#routestxt
 			"", // No URL YET
-			route.Line.Color,
-			"#000000",
+			color,
+			"000000",
 		))
 	}
 
@@ -699,19 +879,7 @@ func (s *MetromanServer) GenerateCalendarTXT(city_code string) (string, string, 
 		"service_id,date,exception_type",
 	}
 
-	// Find all unique schedules used by routes
-	schedule_added := make(map[string]struct{})
-
-	for _, route := range city.Routes {
-		// Only add new schedules
-		schedule := route.Schedule
-		_, is_schedule_added := schedule_added[schedule.Code]
-		if !is_schedule_added {
-			schedule_added[schedule.Code] = struct{}{}
-		} else {
-			continue
-		}
-
+	for _, schedule := range city.ScheduleDef {
 		any_day_of_week_set := schedule.DaysOfWeek[0] == 1 || schedule.DaysOfWeek[1] == 1 || schedule.DaysOfWeek[2] == 1 || schedule.DaysOfWeek[3] == 1 || schedule.DaysOfWeek[4] == 1 || schedule.DaysOfWeek[5] == 1 || schedule.DaysOfWeek[6] == 1
 
 		// A day of the week must be specified or this must have holidays set (as holidays must still reference a schedule)
@@ -758,18 +926,90 @@ func (s *MetromanServer) GenerateTripsTXT(city_code string) (string, error) {
 		"route_id,service_id,trip_id,trip_headsign,direction_id,shape_id",
 	}
 
-	unique_trip_id := 1
 	for _, route := range city.Routes {
-		output = append(output, fmt.Sprintf("%s,%s,%d,%s,%d,%s",
-			route.Code,
-			route.Schedule.Code,
-			unique_trip_id,
-			route.EnglishName,
-			route.IdxWithinLine,
-			route.Code,
-		))
+		for schedule_idx, trips := range route.Trips {
+			for trip_idx, _ := range trips {
+				output = append(output, fmt.Sprintf("%s,%s,%s_trip_%s_%d,%s,%d,shape_%s",
+					route.Code,
+					route.Schedules[schedule_idx].Code,
+					route.Code,
+					route.Schedules[schedule_idx].Code,
+					trip_idx,
+					route.EnglishName,
+					route.IdxWithinLine%2, // Noted here as having to be 0 or 1 https://gtfs.org/documentation/schedule/reference/#stopstxt
+					route.Code,
+				))
+			}
+		}
+	}
 
-		unique_trip_id++
+	return strings.Join(output, "\n"), nil
+}
+
+func (s *MetromanServer) GenerateShapesTXT(city_code string) (string, error) {
+	city, exists := s.Cities[city_code]
+	if !exists {
+		return "", fmt.Errorf("city %v not loaded", city_code)
+	}
+
+	output := []string{
+		"shape_id,shape_pt_lat,shape_pt_lon,shape_pt_sequence,shape_dist_traveled",
+	}
+
+	for _, route := range city.Routes {
+		for i, station := range route.Stations {
+			output = append(output, fmt.Sprintf("shape_%s,%f,%f,%d,",
+				route.Code,
+				station.Lat,
+				station.Lng,
+				i,
+			))
+		}
+	}
+
+	return strings.Join(output, "\n"), nil
+}
+
+func (s *MetromanServer) GenerateStopTimesTXT(city_code string) (string, error) {
+	city, exists := s.Cities[city_code]
+	if !exists {
+		return "", fmt.Errorf("city %v not loaded", city_code)
+	}
+
+	output := []string{
+		"trip_id,arrival_time,departure_time,stop_id,stop_sequence,timepoint",
+	}
+
+	for _, route := range city.Routes {
+		for schedule_idx, trips := range route.Trips {
+			// Sort trips
+			sorted_trips := make([]MetromanTrip, len(trips))
+			copy(sorted_trips, trips)
+			slices.SortFunc(sorted_trips, func(a MetromanTrip, b MetromanTrip) int {
+				return a.Visits[0].DepartureMinutes - b.Visits[0].DepartureMinutes
+			})
+
+			for trip_idx, trip := range sorted_trips {
+				for i, station_visit := range trip.Visits {
+					// We only care about this
+					depart_hour := station_visit.DepartureMinutes / 60
+					depart_min := station_visit.DepartureMinutes % 60
+
+					output = append(output, fmt.Sprintf("%s_trip_%s_%d,%02d:%02d:00,%02d:%02d:00,%s,%d,%d",
+						route.Code,
+						route.Schedules[schedule_idx].Code,
+						trip_idx,
+						depart_hour,
+						depart_min,
+						depart_hour,
+						depart_min,
+						station_visit.Station.Code,
+						i,
+						1, // Timepoints are considered exact
+					))
+				}
+			}
+		}
 	}
 
 	return strings.Join(output, "\n"), nil
