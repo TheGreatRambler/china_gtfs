@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -15,6 +16,7 @@ import (
 )
 
 type MetromanServer struct {
+	CityZips      map[string][]byte
 	Cities        map[string]*MetromanCity
 	ZipDateLookup map[string]string
 
@@ -199,6 +201,7 @@ func CreateServer() (*MetromanServer, error) {
 	}
 
 	return &MetromanServer{
+		CityZips:      make(map[string][]byte),
 		Cities:        make(map[string]*MetromanCity),
 		ZipDateLookup: versions_lookup,
 	}, nil
@@ -208,15 +211,24 @@ func (s *MetromanServer) SetBaiduServer(baidu_server *baidu_client.BaiduServer) 
 	s.BaiduServer = baidu_server
 }
 
+func (s *MetromanServer) GetCityVersion(code string) (string, error) {
+	zip_date, ok := s.ZipDateLookup[code]
+	if !ok {
+		return "", fmt.Errorf("city with code '%s' has not been loaded", code)
+	}
+	return zip_date, nil
+}
+
 func (s *MetromanServer) LoadCity(code string) error {
 	// Get zip date, erroring if this city does not exist
 	zip_date, ok := s.ZipDateLookup[code]
 	if !ok {
-		return fmt.Errorf("city with code '%s' does not exist", code)
+		return fmt.Errorf("city with code '%s' has not been loaded", code)
 	}
 
 	// Download zip (without headers)
-	zip_resp, err := http.Get(fmt.Sprintf("https://metroman.oss-cn-hangzhou.aliyuncs.com/app/metromanandroid/v202005/%s/%s.zip", code, zip_date))
+	url := fmt.Sprintf("https://metroman.oss-cn-hangzhou.aliyuncs.com/app/metromanandroid/v202005/%s/%s.zip", code, zip_date)
+	zip_resp, err := http.Get(url)
 	if err != nil {
 		return err
 	}
@@ -226,6 +238,11 @@ func (s *MetromanServer) LoadCity(code string) error {
 	if err != nil {
 		return err
 	}
+
+	os.WriteFile(fmt.Sprintf("backup/%s.%s.metroman.zip", code, zip_date), zip, 0644)
+
+	s.CityZips[code] = zip
+
 	// Load this zip now
 	city, err := LoadCity(zip_date, zip)
 	if err != nil {
@@ -767,6 +784,14 @@ func LoadCity(zip_prefix string, payload []byte) (*MetromanCity, error) {
 	}, nil
 }
 
+func (s *MetromanServer) GetRawZip(code string) ([]byte, error) {
+	zip, ok := s.CityZips[code]
+	if !ok {
+		return []byte{}, fmt.Errorf("city with code '%s' has not been loaded", code)
+	}
+	return zip, nil
+}
+
 func CSVToMatrixInt(payload_reader *zip.Reader, filename string) ([][]int, error) {
 	matrix_csv_contents, err := ReadFileFromCSV(payload_reader, filename)
 	if err != nil {
@@ -824,7 +849,7 @@ func (s *MetromanServer) GenerateStopsTXT(code string, full bool) (string, error
 		}
 
 		if use_autocomplete_fallback {
-			fmt.Printf("Try typing autocomplete fallback for %s\n", station.EnglishName)
+			//fmt.Printf("Try typing autocomplete fallback for %s\n", station.EnglishName)
 
 			// Try typing autocomplete, uses a heuristic
 			autocomplete_typing, err := s.BaiduServer.GetAutocompleteType(station.SimplifiedName)
@@ -853,8 +878,6 @@ func (s *MetromanServer) GenerateStopsTXT(code string, full bool) (string, error
 			"Asia/Shanghai",
 			0,
 		))
-
-		fmt.Printf("Handled row for %s\n", station.EnglishName)
 	}
 
 	return strings.Join(output, "\n"), nil
