@@ -83,6 +83,8 @@ type MetromanLine struct {
 	Color string
 
 	Stations []*MetromanStation
+	// Just a simple lookup table for paths between stations
+	StationPaths map[string][]Coordinate
 }
 
 type MetromanRoute struct {
@@ -311,6 +313,7 @@ func LoadCity(zip_prefix string, payload []byte) (*MetromanCity, error) {
 				ShortName:       uno_record[7],
 				Color:           uno_record[12],
 				Stations:        []*MetromanStation{},
+				StationPaths:    map[string][]Coordinate{},
 			}
 
 			lines = append(lines, &line)
@@ -702,6 +705,55 @@ func LoadCity(zip_prefix string, payload []byte) (*MetromanCity, error) {
 		route.Trips = trips_by_schedule
 	}
 
+	// Read in the coords for lines in their entirety
+	path_latlng_csv_contents, err := ReadFileFromCSV(payload_reader, fmt.Sprintf("%s/path_latlng.csv", zip_prefix))
+	if err != nil {
+		return nil, fmt.Errorf("could not open path_latlng.csv: %v", err)
+	}
+
+	// Read through the CSV
+	path_latlng_csv_lines := strings.Split(string(path_latlng_csv_contents), "\r\n")
+
+	all_latlng_coords := []Coordinate{}
+	for _, path_latlng_record_line := range path_latlng_csv_lines {
+		path_latlng_record := strings.Split(path_latlng_record_line, ",")
+
+		lat_raw, _ := strconv.ParseFloat(path_latlng_record[0], 64)
+		lng_raw, _ := strconv.ParseFloat(path_latlng_record[1], 64)
+
+		// Add a new coord
+		all_latlng_coords = append(all_latlng_coords, GCJ02ToWGS84(Coordinate{
+			Lat: lat_raw,
+			Lng: lng_raw,
+		}))
+	}
+
+	// Read in the mappings for line and stations to their indices (inclusive) in the list of coords
+	path_rail_csv_contents, err := ReadFileFromCSV(payload_reader, fmt.Sprintf("%s/path_rail.csv", zip_prefix))
+	if err != nil {
+		return nil, fmt.Errorf("could not open path_rail.csv: %v", err)
+	}
+
+	// Read through the CSV
+	path_rail_csv_lines := strings.Split(string(path_rail_csv_contents), "\r\n")
+	for _, path_rail_record_line := range path_rail_csv_lines {
+		path_rail_record := strings.Split(path_rail_record_line, ",")
+
+		lower, _ := strconv.ParseInt(path_rail_record[3], 10, 0)
+		upper, _ := strconv.ParseInt(path_rail_record[4], 10, 0)
+
+		line := lines_by_code[path_rail_record[0]]
+		path_code := fmt.Sprintf("%s_%s", path_rail_record[1], path_rail_record[2])
+
+		_, exists := line.StationPaths[path_code]
+		if !exists {
+			line.StationPaths[path_code] = []Coordinate{}
+		}
+		// Set the coords
+		// TODO use a global list of coords and just index into it
+		line.StationPaths[path_code] = all_latlng_coords[lower : upper+1]
+	}
+
 	return &MetromanCity{
 		Lines:              lines,
 		Routes:             routes,
@@ -988,13 +1040,33 @@ func (s *MetromanServer) GenerateShapesTXT(city_code string) (string, error) {
 	}
 
 	for _, route := range city.Routes {
-		for i, station := range route.Stations {
-			output = append(output, fmt.Sprintf("shape_%s,%f,%f,%d,",
-				route.Code,
-				station.Lat,
-				station.Lng,
-				i,
-			))
+		counter := 0
+		for station_idx := range len(route.Stations) - 1 {
+			coords, exists := route.Line.StationPaths[fmt.Sprintf("%s_%s", route.Stations[station_idx].Code, route.Stations[station_idx+1].Code)]
+			if exists {
+				// Go forwards
+				for i := 0; i < len(coords); i++ {
+					output = append(output, fmt.Sprintf("shape_%s,%f,%f,%d,",
+						route.Code,
+						coords[i].Lat,
+						coords[i].Lng,
+						counter,
+					))
+					counter++
+				}
+			} else {
+				coords := route.Line.StationPaths[fmt.Sprintf("%s_%s", route.Stations[station_idx+1].Code, route.Stations[station_idx].Code)]
+				// Go backwards
+				for i := len(coords) - 1; i >= 0; i-- {
+					output = append(output, fmt.Sprintf("shape_%s,%f,%f,%d,",
+						route.Code,
+						coords[i].Lat,
+						coords[i].Lng,
+						counter,
+					))
+					counter++
+				}
+			}
 		}
 	}
 
