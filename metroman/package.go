@@ -4,11 +4,9 @@ import (
 	"archive/zip"
 	"bytes"
 	"encoding/csv"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -95,11 +93,12 @@ type MetromanRoute struct {
 	TraditionalName string
 	JapaneseName    string
 
-	Stations      []*MetromanStation
-	Line          *MetromanLine
-	IdxWithinLine int
-	Schedules     []*MetromanSchedule
-	Trips         [][]MetromanTrip // Set of trips for each schedule
+	Stations               []*MetromanStation
+	StationToScheduleIndex map[int]int // Station index -> index within schedule (schedule is not in order, is actually in sorted order)
+	Line                   *MetromanLine
+	IdxWithinLine          int
+	Schedules              []*MetromanSchedule
+	Trips                  [][]MetromanTrip // Set of trips for each schedule
 }
 
 type MetromanTrip struct {
@@ -374,6 +373,19 @@ func LoadCity(zip_prefix string, payload []byte) (*MetromanCity, error) {
 			route.Stations = append(route.Stations, stations[station_idx])
 		}
 
+		// Create a mapping so we can create the schedule later
+		station_indices := []int{}
+		// Exclude the last station in the route. This station is ignored in the schedule, the station before it denotes the arrival
+		for _, station := range route.Stations[:len(route.Stations)-1] {
+			station_indices = append(station_indices, station.Index)
+		}
+		slices.Sort(station_indices)
+		station_to_schedule_idx := map[int]int{}
+		for i, station_idx := range station_indices {
+			station_to_schedule_idx[station_idx] = i
+		}
+		route.StationToScheduleIndex = station_to_schedule_idx
+
 		line_idx, _ := strconv.ParseInt(way_record[1], 10, 0)
 		route.Line = lines[line_idx]
 		route.IdxWithinLine = within_line_idx[route.Line.Code]
@@ -552,7 +564,6 @@ func LoadCity(zip_prefix string, payload []byte) (*MetromanCity, error) {
 		current_station_arrivals_departures := []map[int]int{make(map[int]int)}
 		station_idx := 0
 		last_depart_min := 0
-		//is_reversed := route.IdxWithinLine%2 == 1 // Routes in the opposite direction are represented backwards
 		for schedule_record_line_idx, schedule_record_line := range schedule_csv_lines {
 			schedule_record := strings.Split(schedule_record_line, ",")
 
@@ -589,20 +600,20 @@ func LoadCity(zip_prefix string, payload []byte) (*MetromanCity, error) {
 		// Format has routes going the opposite direction reversed in the file format
 		// Apply this change for every schedule
 		//spew.Dump(route.EnglishName, route.IdxWithinLine%2)
-		if route.IdxWithinLine%2 == 1 {
-			for schedule_idx, _ := range station_arrivals_departures {
-				slices.Reverse(station_arrivals_departures[schedule_idx])
-			}
-		}
+		//if route.IdxWithinLine%2 == 1 {
+		//	for schedule_idx, _ := range station_arrivals_departures {
+		//		slices.Reverse(station_arrivals_departures[schedule_idx])
+		//	}
+		//}
 
 		//for schedule_idx, _ := range station_arrivals_departures {
 		//	spew.Dump(len(station_arrivals_departures[schedule_idx]), route.EnglishName)
 		//}
 
-		if route.Code == "BJMW04A" {
-			data, _ := json.MarshalIndent(station_arrivals_departures, "", "  ")
-			os.WriteFile("route_BJMW04A_groups.json", data, 0644)
-		}
+		//if route.Code == "BJMW04A" {
+		//	data, _ := json.MarshalIndent(station_arrivals_departures, "", "  ")
+		//	os.WriteFile("route_BJMW04A_groups.json", data, 0644)
+		//}
 
 		for _, schedule_station_arrivals_departures := range station_arrivals_departures {
 			// Now determine trips from this
@@ -610,7 +621,11 @@ func LoadCity(zip_prefix string, payload []byte) (*MetromanCity, error) {
 			arrival_trip_assigned := make(map[int]int)      // Arrival at next station to trip index (the trips array above)
 			last_arrival_trip_assigned := make(map[int]int) // Same as above but for the last station. Will rotate these out and clear current at the end of each station
 
-			for station_idx, arrivals_departures_map := range schedule_station_arrivals_departures {
+			// Iterate over stations rather than the schedule itself, will look up schedule instead
+			for station_i := range len(route.Stations) - 1 {
+				// Look up schedule
+				this_arrivals_departures := schedule_station_arrivals_departures[route.StationToScheduleIndex[route.Stations[station_i].Index]]
+
 				// Sweep over trips and note which are blacklisted (they have ended)
 				trip_ended := make(map[int]bool)
 				for trip_idx, trip := range trips {
@@ -622,9 +637,9 @@ func LoadCity(zip_prefix string, payload []byte) (*MetromanCity, error) {
 					trip.TripEnded = true
 				}
 
-				if station_idx == 0 {
+				if station_i == 0 {
 					// We are going to iterate over the map. Not ordered, but doesn't matter too much
-					for arrival_next_min, depart_min := range arrivals_departures_map {
+					for arrival_next_min, depart_min := range this_arrivals_departures {
 						// Always creates new trips
 						// We will create two stops here so we can cover the last station should it not be included
 						trips = append(trips, MetromanTrip{
@@ -646,13 +661,13 @@ func LoadCity(zip_prefix string, payload []byte) (*MetromanCity, error) {
 					last_arrival_trip_assigned = arrival_trip_assigned
 					arrival_trip_assigned = make(map[int]int)
 
-					for arrival_next_min, depart_min := range arrivals_departures_map {
+					for arrival_next_min, depart_min := range this_arrivals_departures {
 						trip_idx, trip_found := last_arrival_trip_assigned[depart_min]
 						if trip_found && !trip_ended[trip_idx] {
 							// Add to existing trip
 							// NOTE we add the next station after this current one, not the current one. It already exists
 							trips[trip_idx].Visits = append(trips[trip_idx].Visits, MetromanStationVisit{
-								Station:                 route.Stations[station_idx+1],
+								Station:                 route.Stations[station_i+1],
 								ArrivalAndDepartMinutes: arrival_next_min,
 							})
 							trips[trip_idx].TripEnded = false
@@ -664,10 +679,10 @@ func LoadCity(zip_prefix string, payload []byte) (*MetromanCity, error) {
 							trips = append(trips, MetromanTrip{
 								TripEnded: false,
 								Visits: []MetromanStationVisit{{
-									Station:                 route.Stations[station_idx],
+									Station:                 route.Stations[station_i],
 									ArrivalAndDepartMinutes: depart_min,
 								}, {
-									Station:                 route.Stations[station_idx+1],
+									Station:                 route.Stations[station_i+1],
 									ArrivalAndDepartMinutes: arrival_next_min,
 								}},
 							})
