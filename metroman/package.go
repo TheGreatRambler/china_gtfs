@@ -928,22 +928,24 @@ func (s *MetromanServer) GenerateRoutesTXT(city_code string) (string, error) {
 	}
 
 	for _, route := range city.Routes {
-		// No hashtag in color
-		color := ""
-		if len(route.Line.Color) > 0 {
-			color = route.Line.Color[1:]
-		}
+		if len(route.Trips) > 0 {
+			// No hashtag in color
+			color := ""
+			if len(route.Line.Color) > 0 {
+				color = route.Line.Color[1:]
+			}
 
-		output = append(output, fmt.Sprintf("%s,%s,%s,%s,%d,%s,%s,%s",
-			city_code,
-			route.Code,
-			route.SimplifiedName,
-			route.EnglishName,
-			2,  // https://gtfs.org/documentation/schedule/reference/#routestxt
-			"", // No URL YET
-			color,
-			"000000",
-		))
+			output = append(output, fmt.Sprintf("%s,%s,%s,%s,%d,%s,%s,%s",
+				city_code,
+				route.Code,
+				route.SimplifiedName,
+				route.EnglishName,
+				2,  // https://gtfs.org/documentation/schedule/reference/#routestxt
+				"", // No URL YET
+				color,
+				"000000",
+			))
+		}
 	}
 
 	return strings.Join(output, "\n"), nil
@@ -1010,18 +1012,20 @@ func (s *MetromanServer) GenerateTripsTXT(city_code string) (string, error) {
 	}
 
 	for _, route := range city.Routes {
-		for schedule_idx, trips := range route.Trips {
-			for trip_idx, _ := range trips {
-				output = append(output, fmt.Sprintf("%s,%s,%s_trip_%s_%d,%s,%d,shape_%s",
-					route.Code,
-					route.Schedules[schedule_idx].Code,
-					route.Code,
-					route.Schedules[schedule_idx].Code,
-					trip_idx,
-					route.EnglishName,
-					route.IdxWithinLine%2, // Noted here as having to be 0 or 1 https://gtfs.org/documentation/schedule/reference/#stopstxt
-					route.Code,
-				))
+		if len(route.Trips) > 0 {
+			for schedule_idx, trips := range route.Trips {
+				for trip_idx, _ := range trips {
+					output = append(output, fmt.Sprintf("%s,%s,%s_trip_%s_%d,%s,%d,shape_%s",
+						route.Code,
+						route.Schedules[schedule_idx].Code,
+						route.Code,
+						route.Schedules[schedule_idx].Code,
+						trip_idx,
+						route.EnglishName,
+						route.IdxWithinLine%2, // Noted here as having to be 0 or 1 https://gtfs.org/documentation/schedule/reference/#stopstxt
+						route.Code,
+					))
+				}
 			}
 		}
 	}
@@ -1040,31 +1044,33 @@ func (s *MetromanServer) GenerateShapesTXT(city_code string) (string, error) {
 	}
 
 	for _, route := range city.Routes {
-		counter := 0
-		for station_idx := range len(route.Stations) - 1 {
-			coords, exists := route.Line.StationPaths[fmt.Sprintf("%s_%s", route.Stations[station_idx].Code, route.Stations[station_idx+1].Code)]
-			if exists {
-				// Go forwards
-				for i := 0; i < len(coords); i++ {
-					output = append(output, fmt.Sprintf("shape_%s,%f,%f,%d,",
-						route.Code,
-						coords[i].Lat,
-						coords[i].Lng,
-						counter,
-					))
-					counter++
-				}
-			} else {
-				coords := route.Line.StationPaths[fmt.Sprintf("%s_%s", route.Stations[station_idx+1].Code, route.Stations[station_idx].Code)]
-				// Go backwards
-				for i := len(coords) - 1; i >= 0; i-- {
-					output = append(output, fmt.Sprintf("shape_%s,%f,%f,%d,",
-						route.Code,
-						coords[i].Lat,
-						coords[i].Lng,
-						counter,
-					))
-					counter++
+		if len(route.Trips) > 0 {
+			counter := 0
+			for station_idx := range len(route.Stations) - 1 {
+				coords, exists := route.Line.StationPaths[fmt.Sprintf("%s_%s", route.Stations[station_idx].Code, route.Stations[station_idx+1].Code)]
+				if exists {
+					// Go forwards
+					for i := 0; i < len(coords); i++ {
+						output = append(output, fmt.Sprintf("shape_%s,%f,%f,%d,",
+							route.Code,
+							coords[i].Lat,
+							coords[i].Lng,
+							counter,
+						))
+						counter++
+					}
+				} else {
+					coords := route.Line.StationPaths[fmt.Sprintf("%s_%s", route.Stations[station_idx+1].Code, route.Stations[station_idx].Code)]
+					// Go backwards
+					for i := len(coords) - 1; i >= 0; i-- {
+						output = append(output, fmt.Sprintf("shape_%s,%f,%f,%d,",
+							route.Code,
+							coords[i].Lat,
+							coords[i].Lng,
+							counter,
+						))
+						counter++
+					}
 				}
 			}
 		}
