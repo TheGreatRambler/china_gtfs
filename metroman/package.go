@@ -435,7 +435,7 @@ func LoadCity(zip_prefix string, payload []byte) (*MetromanCity, error) {
 		stations := []*MetromanStation{}
 		if len(station_codes) == 1 && station_codes[0] == "" {
 			// Get stations from route
-			stations = routes_by_code[fare_record[1]].Stations
+			stations = routes_by_code[strings.Split(fare_record[1], "|")[0]].Stations
 		} else {
 			for _, station_code := range station_codes {
 				stations = append(stations, stations_by_code[station_code])
@@ -581,59 +581,68 @@ func LoadCity(zip_prefix string, payload []byte) (*MetromanCity, error) {
 
 		// Will read file into here then parse
 		// map is arrival_next -> departure
-		current_station_arrivals_departures := []map[int]int{make(map[int]int)}
-		station_idx := 0
-		last_depart_min := 0
-		for schedule_record_line_idx, schedule_record_line := range schedule_csv_lines {
-			schedule_record := strings.Split(schedule_record_line, ",")
+		if len(schedule_csv_lines) != (len(route.Stations)-1)*len(route.Schedules) {
+			// Path when trains end in the middle and we have to intelligently handle that
+			schedule_station_arrivals_departures := []map[int]int{make(map[int]int)}
+			station_idx := 0
+			last_depart_min := 0
 
-			depart_min, _ := strconv.ParseInt(schedule_record[0], 10, 0)
-			arrive_next_min, _ := strconv.ParseInt(schedule_record[1], 10, 0)
+			for schedule_record_line_idx, schedule_record_line := range schedule_csv_lines {
+				schedule_record := strings.Split(schedule_record_line, ",")
 
-			if int(depart_min) < last_depart_min {
-				if len(current_station_arrivals_departures) == len(route.Stations)-1 {
-					// A set of trips exists for this schedule. We have reached a new schedule
-					// Save this one, clear and reset
+				depart_min, _ := strconv.ParseInt(schedule_record[0], 10, 0)
+				arrive_next_min, _ := strconv.ParseInt(schedule_record[1], 10, 0)
+
+				if int(depart_min) < last_depart_min {
+					if len(schedule_station_arrivals_departures) == len(route.Stations)-1 {
+						// A set of trips exists for this schedule. We have reached a new schedule
+						// Save this one, clear and reset
+						station_arrivals_departures = append(station_arrivals_departures,
+							schedule_station_arrivals_departures)
+
+						station_idx = 0
+						schedule_station_arrivals_departures = []map[int]int{make(map[int]int)}
+					} else {
+						station_idx++
+						// Always add to the list. This list is wiped so that there are never any extra maps
+						schedule_station_arrivals_departures = append(schedule_station_arrivals_departures,
+							make(map[int]int))
+					}
+				}
+
+				schedule_station_arrivals_departures[station_idx][int(arrive_next_min)] = int(depart_min)
+				last_depart_min = int(depart_min)
+
+				// If we're the last one add the current map
+				if schedule_record_line_idx == len(schedule_csv_lines)-1 {
 					station_arrivals_departures = append(station_arrivals_departures,
-						current_station_arrivals_departures)
-
-					station_idx = 0
-					current_station_arrivals_departures = []map[int]int{make(map[int]int)}
-				} else {
-					station_idx++
-					// Always add to the list. This list is wiped so that there are never any extra maps
-					current_station_arrivals_departures = append(current_station_arrivals_departures,
-						make(map[int]int))
+						schedule_station_arrivals_departures)
 				}
 			}
+		} else {
+			// There's one train per schedule. Special case as there's no way of detecting a new station
+			csv_idx := 0
+			for range route.Schedules {
+				schedule_station_arrivals_departures := []map[int]int{}
 
-			current_station_arrivals_departures[station_idx][int(arrive_next_min)] = int(depart_min)
-			last_depart_min = int(depart_min)
+				for range len(route.Stations) - 1 {
+					schedule_record := strings.Split(schedule_csv_lines[csv_idx], ",")
 
-			// If we're the last one add the current map
-			if schedule_record_line_idx == len(schedule_csv_lines)-1 {
+					depart_min, _ := strconv.ParseInt(schedule_record[0], 10, 0)
+					arrive_next_min, _ := strconv.ParseInt(schedule_record[1], 10, 0)
+
+					// Only one entry per station
+					schedule_station_arrivals_departures = append(schedule_station_arrivals_departures, map[int]int{
+						int(arrive_next_min): int(depart_min),
+					})
+
+					csv_idx++
+				}
+
 				station_arrivals_departures = append(station_arrivals_departures,
-					current_station_arrivals_departures)
+					schedule_station_arrivals_departures)
 			}
 		}
-
-		// Format has routes going the opposite direction reversed in the file format
-		// Apply this change for every schedule
-		//spew.Dump(route.EnglishName, route.IdxWithinLine%2)
-		//if route.IdxWithinLine%2 == 1 {
-		//	for schedule_idx, _ := range station_arrivals_departures {
-		//		slices.Reverse(station_arrivals_departures[schedule_idx])
-		//	}
-		//}
-
-		//for schedule_idx, _ := range station_arrivals_departures {
-		//	spew.Dump(len(station_arrivals_departures[schedule_idx]), route.EnglishName)
-		//}
-
-		//if route.Code == "BJMW04A" {
-		//	data, _ := json.MarshalIndent(station_arrivals_departures, "", "  ")
-		//	os.WriteFile("route_BJMW04A_groups.json", data, 0644)
-		//}
 
 		for _, schedule_station_arrivals_departures := range station_arrivals_departures {
 			// Now determine trips from this
@@ -934,7 +943,7 @@ func (s *MetromanServer) GenerateFaresTXT(code string, full bool) (string, strin
 func (s *MetromanServer) GenerateAgencyTXT(code string) string {
 	output := []string{
 		"agency_id,agency_name,agency_url,agency_timezone,agency_lang,agency_phone",
-		fmt.Sprintf("%s,MetroMan-GTFS %s,%s,%s,%s,", code, code, "https://tgrcode.com/", "Asia/Shanghai", "zh"),
+		fmt.Sprintf("%s,China-GTFS %s,%s,%s,%s,", code, code, "https://tgrcode.com/", "Asia/Shanghai", "zh"),
 	}
 
 	return strings.Join(output, "\n")
