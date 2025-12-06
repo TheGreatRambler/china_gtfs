@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -238,8 +237,6 @@ func (s *MetromanServer) LoadCity(code string) error {
 	if err != nil {
 		return err
 	}
-
-	os.WriteFile(fmt.Sprintf("backup/%s.%s.metroman.zip", code, zip_date), zip, 0644)
 
 	s.CityZips[code] = zip
 
@@ -831,11 +828,17 @@ func (s *MetromanServer) GenerateStopsTXT(code string, full bool) (string, error
 		return "", fmt.Errorf("city %v not loaded", code)
 	}
 
-	output := []string{
-		"stop_id,stop_code,stop_name,tts_stop_name,stop_desc," +
-			"stop_lat,stop_lon,zone_id,stop_url,location_type," +
-			"parent_station,stop_timezone,wheelchair_boarding," +
-			"level_id,platform_code,stop_access",
+	var buf bytes.Buffer
+	csv_writer := csv.NewWriter(&buf)
+
+	// Header
+	if err := csv_writer.Write([]string{
+		"stop_id", "stop_code", "stop_name", "tts_stop_name", "stop_desc",
+		"stop_lat", "stop_lon", "zone_id", "stop_url", "location_type",
+		"parent_station", "stop_timezone", "wheelchair_boarding",
+		"level_id", "platform_code", "stop_access",
+	}); err != nil {
+		return "", err
 	}
 
 	for station_code, station := range city.StationsByCode {
@@ -875,21 +878,36 @@ func (s *MetromanServer) GenerateStopsTXT(code string, full bool) (string, error
 			}
 		}
 
-		output = append(output, fmt.Sprintf("%s,%s,%s,,,%f,%f,%s,%s,%d,,%s,%d,,,",
-			station_code,           // Potentially internal to MetroMan
-			station.SimplifiedName, // Potentially not true for cities other than Beijing
-			station.EnglishName,    // China likely defaults to the Chinese name for all public comms, we'll use English for now though
-			station.Lat,
-			station.Lng,
-			fmt.Sprintf("zone_%s", station_code), // Peculiarly of GTFS: fares cannot be specified by distance, this must be done instead
+		record := []string{
+			station_code,           // stop_id (potentially internal to MetroMan)
+			station.SimplifiedName, // stop_code (potentially not true for cities other than Beijing)
+			station.EnglishName,    // stop_name
+			"",                     // tts_stop_name
+			"",                     // stop_desc
+			fmt.Sprintf("%f", station.Lat),
+			fmt.Sprintf("%f", station.Lng),
+			fmt.Sprintf("zone_%s", station_code), // Peculiarity of GTFS: fares cannot be specified by distance, this must be done instead
 			url,
-			0,
-			"Asia/Shanghai",
-			0,
-		))
+			"0",             // location_type
+			"",              // parent_station
+			"Asia/Shanghai", // stop_timezone
+			"0",             // wheelchair_boarding
+			"",              // level_id
+			"",              // platform_code
+			"",              // stop_access
+		}
+
+		if err := csv_writer.Write(record); err != nil {
+			return "", err
+		}
 	}
 
-	return strings.Join(output, "\n"), nil
+	csv_writer.Flush()
+	if err := csv_writer.Error(); err != nil {
+		return "", err
+	}
+
+	return buf.String(), nil
 }
 
 func (s *MetromanServer) GenerateFaresTXT(code string, full bool) (string, string, error) {
@@ -903,12 +921,23 @@ func (s *MetromanServer) GenerateFaresTXT(code string, full bool) (string, strin
 	// Will be using GTFS fares v1 and generating every station to station pair in one direction
 	// TODO only do one direction optimization if the fare matrix is mirrored, for now assuming it
 
-	// First generate fare_rules.txt
-	rules_output := []string{
-		"fare_id,route_id,origin_id,destination_id,contains_id",
+	var rules_buf bytes.Buffer
+	var attrs_buf bytes.Buffer
+	rules_writer := csv.NewWriter(&rules_buf)
+	attrs_writer := csv.NewWriter(&attrs_buf)
+
+	// fare_rules.txt header
+	if err := rules_writer.Write([]string{
+		"fare_id", "route_id", "origin_id", "destination_id", "contains_id",
+	}); err != nil {
+		return "", "", err
 	}
-	attributes_output := []string{
-		"fare_id,price,currency_type,payment_method,transfers,agency_id,transfer_duration",
+
+	// fare_attributes.txt header
+	if err := attrs_writer.Write([]string{
+		"fare_id", "price", "currency_type", "payment_method", "transfers", "agency_id", "transfer_duration",
+	}); err != nil {
+		return "", "", err
 	}
 
 	for i, fare_matrix_stations := range city.FareMatrixStations {
@@ -917,36 +946,69 @@ func (s *MetromanServer) GenerateFaresTXT(code string, full bool) (string, strin
 				// I am allowing ALL station pairs so transit apps don't choke
 				// if end_station.Index >= start_station.Index
 
-				rules_output = append(rules_output, fmt.Sprintf("fare_%s_%s,,zone_%s,zone_%s,",
+				fare_id := fmt.Sprintf("fare_%s_%s",
 					city.Stations[start_station.Index].Code,
 					city.Stations[end_station.Index].Code,
-					city.Stations[start_station.Index].Code,
-					city.Stations[end_station.Index].Code,
-				))
+				)
 
-				attributes_output = append(attributes_output, fmt.Sprintf("fare_%s_%s,%d,%s,%d,%d,,",
-					city.Stations[start_station.Index].Code,
-					city.Stations[end_station.Index].Code,
-					(*city.FareMatrices[i])[x][y],
+				// rules
+				if err := rules_writer.Write([]string{
+					fare_id,
+					"", // route_id
+					fmt.Sprintf("zone_%s", city.Stations[start_station.Index].Code),
+					fmt.Sprintf("zone_%s", city.Stations[end_station.Index].Code),
+					"", // contains_id
+				}); err != nil {
+					return "", "", err
+				}
+
+				// attributes
+				if err := attrs_writer.Write([]string{
+					fare_id,
+					fmt.Sprintf("%d", (*city.FareMatrices[i])[x][y]),
 					"CNY",
-					1,
-					0,
-				))
+					"1", // payment_method
+					"0", // transfers
+					"",  // agency_id
+					"",  // transfer_duration
+				}); err != nil {
+					return "", "", err
+				}
 			}
 		}
 	}
 
-	return strings.Join(rules_output, "\n"),
-		strings.Join(attributes_output, "\n"), nil
+	rules_writer.Flush()
+	attrs_writer.Flush()
+
+	if err := rules_writer.Error(); err != nil {
+		return "", "", err
+	}
+	if err := attrs_writer.Error(); err != nil {
+		return "", "", err
+	}
+
+	return rules_buf.String(), attrs_buf.String(), nil
 }
 
 func (s *MetromanServer) GenerateAgencyTXT(code string) string {
-	output := []string{
-		"agency_id,agency_name,agency_url,agency_timezone,agency_lang,agency_phone",
-		fmt.Sprintf("%s,China-GTFS %s,%s,%s,%s,", code, code, "https://tgrcode.com/", "Asia/Shanghai", "zh"),
-	}
+	var buf bytes.Buffer
+	csv_writer := csv.NewWriter(&buf)
 
-	return strings.Join(output, "\n")
+	_ = csv_writer.Write([]string{
+		"agency_id", "agency_name", "agency_url", "agency_timezone", "agency_lang", "agency_phone",
+	})
+	_ = csv_writer.Write([]string{
+		code,
+		fmt.Sprintf("China-GTFS %s", s.BaiduServer.CityUIDMappingsByMetromanCode[code].EnglishName),
+		"https://tgrcode.com/",
+		"Asia/Shanghai",
+		"zh",
+		"",
+	})
+
+	csv_writer.Flush()
+	return buf.String()
 }
 
 func (s *MetromanServer) GenerateRoutesTXT(city_code string) (string, error) {
@@ -955,8 +1017,14 @@ func (s *MetromanServer) GenerateRoutesTXT(city_code string) (string, error) {
 		return "", fmt.Errorf("city %v not loaded", city_code)
 	}
 
-	output := []string{
-		"agency_id,route_id,route_short_name,route_long_name,route_type,route_url,route_color,route_text_color",
+	var buf bytes.Buffer
+	csv_writer := csv.NewWriter(&buf)
+
+	if err := csv_writer.Write([]string{
+		"agency_id", "route_id", "route_short_name", "route_long_name",
+		"route_type", "route_url", "route_color", "route_text_color",
+	}); err != nil {
+		return "", err
 	}
 
 	for _, route := range city.Routes {
@@ -967,20 +1035,27 @@ func (s *MetromanServer) GenerateRoutesTXT(city_code string) (string, error) {
 				color = route.Line.Color[1:]
 			}
 
-			output = append(output, fmt.Sprintf("%s,%s,%s,%s,%d,%s,%s,%s",
+			if err := csv_writer.Write([]string{
 				city_code,
 				route.Code,
 				route.SimplifiedName,
 				route.EnglishName,
-				2,  // https://gtfs.org/documentation/schedule/reference/#routestxt
-				"", // No URL YET
+				"2", // https://gtfs.org/documentation/schedule/reference/#routestxt
+				"",  // No URL YET
 				color,
 				"000000",
-			))
+			}); err != nil {
+				return "", err
+			}
 		}
 	}
 
-	return strings.Join(output, "\n"), nil
+	csv_writer.Flush()
+	if err := csv_writer.Error(); err != nil {
+		return "", err
+	}
+
+	return buf.String(), nil
 }
 
 func (s *MetromanServer) GenerateCalendarTXT(city_code string) (string, string, error) {
@@ -989,11 +1064,21 @@ func (s *MetromanServer) GenerateCalendarTXT(city_code string) (string, string, 
 		return "", "", fmt.Errorf("city %v not loaded", city_code)
 	}
 
-	calendar_output := []string{
-		"service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date",
+	var cal_buf bytes.Buffer
+	var dates_buf bytes.Buffer
+	cal_writer := csv.NewWriter(&cal_buf)
+	dates_writer := csv.NewWriter(&dates_buf)
+
+	if err := cal_writer.Write([]string{
+		"service_id", "monday", "tuesday", "wednesday", "thursday",
+		"friday", "saturday", "sunday", "start_date", "end_date",
+	}); err != nil {
+		return "", "", err
 	}
-	calendar_dates_output := []string{
-		"service_id,date,exception_type",
+	if err := dates_writer.Write([]string{
+		"service_id", "date", "exception_type",
+	}); err != nil {
+		return "", "", err
 	}
 
 	for _, schedule := range city.ScheduleDef {
@@ -1001,18 +1086,20 @@ func (s *MetromanServer) GenerateCalendarTXT(city_code string) (string, string, 
 
 		// A day of the week must be specified or this must have holidays set (as holidays must still reference a schedule)
 		if any_day_of_week_set || schedule.Holidays {
-			calendar_output = append(calendar_output, fmt.Sprintf("%s,%d,%d,%d,%d,%d,%d,%d,%s,%s",
+			if err := cal_writer.Write([]string{
 				schedule.Code,
-				schedule.DaysOfWeek[0],
-				schedule.DaysOfWeek[1],
-				schedule.DaysOfWeek[2],
-				schedule.DaysOfWeek[3],
-				schedule.DaysOfWeek[4],
-				schedule.DaysOfWeek[5],
-				schedule.DaysOfWeek[6],
+				fmt.Sprintf("%d", schedule.DaysOfWeek[0]),
+				fmt.Sprintf("%d", schedule.DaysOfWeek[1]),
+				fmt.Sprintf("%d", schedule.DaysOfWeek[2]),
+				fmt.Sprintf("%d", schedule.DaysOfWeek[3]),
+				fmt.Sprintf("%d", schedule.DaysOfWeek[4]),
+				fmt.Sprintf("%d", schedule.DaysOfWeek[5]),
+				fmt.Sprintf("%d", schedule.DaysOfWeek[6]),
 				fmt.Sprintf("%04d%02d%02d", 2000, 1, 1),   // Day in the past
 				fmt.Sprintf("%04d%02d%02d", 9999, 12, 31), // Day in the future
-			))
+			}); err != nil {
+				return "", "", err
+			}
 		}
 
 		date_action := 2 // Remove the date
@@ -1022,15 +1109,27 @@ func (s *MetromanServer) GenerateCalendarTXT(city_code string) (string, string, 
 
 		// Note every single holiday day
 		for _, holiday := range city.Holidays {
-			calendar_dates_output = append(calendar_dates_output, fmt.Sprintf("%s,%s,%d",
+			if err := dates_writer.Write([]string{
 				schedule.Code,
 				fmt.Sprintf("%04d%02d%02d", holiday.Year, holiday.Month, holiday.Day),
-				date_action, // Whether this date was added or not depends on the holiday
-			))
+				fmt.Sprintf("%d", date_action),
+			}); err != nil {
+				return "", "", err
+			}
 		}
 	}
 
-	return strings.Join(calendar_output, "\n"), strings.Join(calendar_dates_output, "\n"), nil
+	cal_writer.Flush()
+	dates_writer.Flush()
+
+	if err := cal_writer.Error(); err != nil {
+		return "", "", err
+	}
+	if err := dates_writer.Error(); err != nil {
+		return "", "", err
+	}
+
+	return cal_buf.String(), dates_buf.String(), nil
 }
 
 func (s *MetromanServer) GenerateTripsTXT(city_code string) (string, error) {
@@ -1039,30 +1138,46 @@ func (s *MetromanServer) GenerateTripsTXT(city_code string) (string, error) {
 		return "", fmt.Errorf("city %v not loaded", city_code)
 	}
 
-	output := []string{
-		"route_id,service_id,trip_id,trip_headsign,direction_id,shape_id",
+	var buf bytes.Buffer
+	csv_writer := csv.NewWriter(&buf)
+
+	if err := csv_writer.Write([]string{
+		"route_id", "service_id", "trip_id", "trip_headsign", "direction_id", "shape_id",
+	}); err != nil {
+		return "", err
 	}
 
 	for _, route := range city.Routes {
 		if len(route.Trips) > 0 {
 			for schedule_idx, trips := range route.Trips {
-				for trip_idx, _ := range trips {
-					output = append(output, fmt.Sprintf("%s,%s,%s_trip_%s_%d,%s,%d,shape_%s",
-						route.Code,
-						route.Schedules[schedule_idx].Code,
+				for trip_idx := range trips {
+					trip_id := fmt.Sprintf("%s_trip_%s_%d",
 						route.Code,
 						route.Schedules[schedule_idx].Code,
 						trip_idx,
-						route.EnglishName,
-						route.IdxWithinLine%2, // Noted here as having to be 0 or 1 https://gtfs.org/documentation/schedule/reference/#stopstxt
+					)
+
+					if err := csv_writer.Write([]string{
 						route.Code,
-					))
+						route.Schedules[schedule_idx].Code,
+						trip_id,
+						route.EnglishName,
+						fmt.Sprintf("%d", route.IdxWithinLine%2), // 0 or 1
+						fmt.Sprintf("shape_%s", route.Code),
+					}); err != nil {
+						return "", err
+					}
 				}
 			}
 		}
 	}
 
-	return strings.Join(output, "\n"), nil
+	csv_writer.Flush()
+	if err := csv_writer.Error(); err != nil {
+		return "", err
+	}
+
+	return buf.String(), nil
 }
 
 func (s *MetromanServer) GenerateShapesTXT(city_code string) (string, error) {
@@ -1071,8 +1186,13 @@ func (s *MetromanServer) GenerateShapesTXT(city_code string) (string, error) {
 		return "", fmt.Errorf("city %v not loaded", city_code)
 	}
 
-	output := []string{
-		"shape_id,shape_pt_lat,shape_pt_lon,shape_pt_sequence,shape_dist_traveled",
+	var buf bytes.Buffer
+	csv_writer := csv.NewWriter(&buf)
+
+	if err := csv_writer.Write([]string{
+		"shape_id", "shape_pt_lat", "shape_pt_lon", "shape_pt_sequence", "shape_dist_traveled",
+	}); err != nil {
+		return "", err
 	}
 
 	for _, route := range city.Routes {
@@ -1083,24 +1203,30 @@ func (s *MetromanServer) GenerateShapesTXT(city_code string) (string, error) {
 				if exists {
 					// Go forwards
 					for i := 0; i < len(coords); i++ {
-						output = append(output, fmt.Sprintf("shape_%s,%f,%f,%d,",
-							route.Code,
-							coords[i].Lat,
-							coords[i].Lng,
-							counter,
-						))
+						if err := csv_writer.Write([]string{
+							fmt.Sprintf("shape_%s", route.Code),
+							fmt.Sprintf("%f", coords[i].Lat),
+							fmt.Sprintf("%f", coords[i].Lng),
+							fmt.Sprintf("%d", counter),
+							"",
+						}); err != nil {
+							return "", err
+						}
 						counter++
 					}
 				} else {
 					coords := route.Line.StationPaths[fmt.Sprintf("%s_%s", route.Stations[station_idx+1].Code, route.Stations[station_idx].Code)]
 					// Go backwards
 					for i := len(coords) - 1; i >= 0; i-- {
-						output = append(output, fmt.Sprintf("shape_%s,%f,%f,%d,",
-							route.Code,
-							coords[i].Lat,
-							coords[i].Lng,
-							counter,
-						))
+						if err := csv_writer.Write([]string{
+							fmt.Sprintf("shape_%s", route.Code),
+							fmt.Sprintf("%f", coords[i].Lat),
+							fmt.Sprintf("%f", coords[i].Lng),
+							fmt.Sprintf("%d", counter),
+							"",
+						}); err != nil {
+							return "", err
+						}
 						counter++
 					}
 				}
@@ -1108,7 +1234,12 @@ func (s *MetromanServer) GenerateShapesTXT(city_code string) (string, error) {
 		}
 	}
 
-	return strings.Join(output, "\n"), nil
+	csv_writer.Flush()
+	if err := csv_writer.Error(); err != nil {
+		return "", err
+	}
+
+	return buf.String(), nil
 }
 
 func (s *MetromanServer) GenerateStopTimesTXT(city_code string) (string, error) {
@@ -1117,8 +1248,13 @@ func (s *MetromanServer) GenerateStopTimesTXT(city_code string) (string, error) 
 		return "", fmt.Errorf("city %v not loaded", city_code)
 	}
 
-	output := []string{
-		"trip_id,arrival_time,departure_time,stop_id,stop_sequence,timepoint",
+	var buf bytes.Buffer
+	csv_writer := csv.NewWriter(&buf)
+
+	if err := csv_writer.Write([]string{
+		"trip_id", "arrival_time", "departure_time", "stop_id", "stop_sequence", "timepoint",
+	}); err != nil {
+		return "", err
 	}
 
 	for _, route := range city.Routes {
@@ -1136,22 +1272,32 @@ func (s *MetromanServer) GenerateStopTimesTXT(city_code string) (string, error) 
 					depart_hour := station_visit.ArrivalAndDepartMinutes / 60
 					depart_min := station_visit.ArrivalAndDepartMinutes % 60
 
-					output = append(output, fmt.Sprintf("%s_trip_%s_%d,%02d:%02d:00,%02d:%02d:00,%s,%d,%d",
+					trip_id := fmt.Sprintf("%s_trip_%s_%d",
 						route.Code,
 						route.Schedules[schedule_idx].Code,
 						trip_idx,
-						depart_hour,
-						depart_min,
-						depart_hour,
-						depart_min,
+					)
+					time_str := fmt.Sprintf("%02d:%02d:00", depart_hour, depart_min)
+
+					if err := csv_writer.Write([]string{
+						trip_id,
+						time_str,
+						time_str,
 						station_visit.Station.Code,
-						i,
-						1, // Timepoints are considered exact
-					))
+						fmt.Sprintf("%d", i),
+						"1", // Timepoints are considered exact
+					}); err != nil {
+						return "", err
+					}
 				}
 			}
 		}
 	}
 
-	return strings.Join(output, "\n"), nil
+	csv_writer.Flush()
+	if err := csv_writer.Error(); err != nil {
+		return "", err
+	}
+
+	return buf.String(), nil
 }

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/gorilla/mux"
 	"tgrcode.com/china_gtfs"
@@ -170,6 +171,9 @@ func metromanLoadAll(csv_path string, generate_gtfs func(code string) ([]byte, e
 
 	row_index := 0
 	for {
+		// Sleep a bit on every iteration as to not overload MetroMan
+		time.Sleep(time.Second * 1)
+
 		record, err := r.Read()
 		if err == io.EOF {
 			break
