@@ -24,3 +24,8 @@ To test all available GTFS feeds in OpenTripPlanner:
 2. Download an OpenStreetMap PBF, like [China](https://download.geofabrik.de/asia/china.html) or [Beijing](https://download.geofabrik.de/asia/china/beijing.html), and save to directory `build`
 3. Run `./build_otp.sh`, which uses the latest OpenTripPlanner Docker container to generate a `graph.obj` file
 4. Run `./test_otp.sh`, which uses the latest OpenTripPlanner Docker container to expose a routing frontend at `http://localhost:8080`
+
+# Coming
+* Fares support
+* Automated testing against existing apps
+* Additional apps implemented
