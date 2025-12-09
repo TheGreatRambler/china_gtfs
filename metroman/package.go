@@ -20,6 +20,8 @@ type MetromanServer struct {
 	Cities        map[string]*MetromanCity
 	ZipDateLookup map[string]string
 
+	ChinaHandler *common.ChinaHandler
+
 	BaiduServer *baidu_client.BaiduServer
 }
 
@@ -124,32 +126,6 @@ type MetromanExit struct {
 	SimplifiedDescription string
 }
 
-// Used to get the combined schedules of routes
-/*
-func OrSchedules(schedules []MetromanSchedule) MetromanSchedule {
-	var out MetromanSchedule
-
-	all_codes := []string{}
-	for _, s := range schedules {
-		// OR each of the 7 days
-		for i := 0; i < 7; i++ {
-			if s.DaysOfWeek[i] == 1 {
-				out.DaysOfWeek[i] = 1
-			}
-		}
-
-		// OR holidays
-		out.Holidays = out.Holidays || s.Holidays
-
-		all_codes = append(all_codes, s.Code)
-	}
-
-	out.Code = strings.Join(all_codes, "_")
-
-	return out
-}
-*/
-
 func CreateServer() (*MetromanServer, error) {
 	// Download version.txt (without headers)
 	// Determined with a reverse proxy
@@ -174,9 +150,16 @@ func CreateServer() (*MetromanServer, error) {
 		}
 	}
 
+	// Create China handler for coordinates
+	china_handler, err := common.NewChinaHandler("china.geojson")
+	if err != nil {
+		return nil, err
+	}
+
 	return &MetromanServer{
 		CityZips:      make(map[string][]byte),
 		Cities:        make(map[string]*MetromanCity),
+		ChinaHandler:  china_handler,
 		ZipDateLookup: versions_lookup,
 	}, nil
 }
@@ -216,7 +199,7 @@ func (s *MetromanServer) LoadCity(code string) error {
 	s.CityZips[code] = zip
 
 	// Load this zip now
-	city, err := LoadCity(zip_date, zip)
+	city, err := s.LoadCityInternal(zip_date, zip, code)
 	if err != nil {
 		return err
 	}
@@ -227,7 +210,7 @@ func (s *MetromanServer) LoadCity(code string) error {
 	return nil
 }
 
-func LoadCity(zip_prefix string, payload []byte) (*MetromanCity, error) {
+func (s *MetromanServer) LoadCityInternal(zip_prefix string, payload []byte, city_code string) (*MetromanCity, error) {
 	// Step 1: Create a new zip reader from the []byte data
 	payload_reader, err := zip.NewReader(bytes.NewReader(payload), int64(len(payload)))
 	if err != nil {
@@ -264,10 +247,19 @@ func LoadCity(zip_prefix string, payload []byte) (*MetromanCity, error) {
 			subway_map_x, _ := strconv.ParseInt(uno_record[10], 10, 0)
 			subway_map_y, _ := strconv.ParseInt(uno_record[11], 10, 0)
 
-			corrected_coord := common.GCJ02ToWGS84(common.Coordinate{
-				Lat: lat_raw,
-				Lng: lng_raw,
-			})
+			var corrected_coord common.Coordinate
+			// Keep as-is if Taipei, Macao, or Hong Kong
+			if city_code == "tb" || city_code == "am" || city_code == "hk" {
+				corrected_coord = common.Coordinate{
+					Lat: lat_raw,
+					Lng: lng_raw,
+				}
+			} else {
+				corrected_coord = s.ChinaHandler.GCJ02ToWGS84(common.Coordinate{
+					Lat: lat_raw,
+					Lng: lng_raw,
+				})
+			}
 
 			station := MetromanStation{
 				Code:             uno_record[0],
@@ -719,11 +711,22 @@ func LoadCity(zip_prefix string, payload []byte) (*MetromanCity, error) {
 		lat_raw, _ := strconv.ParseFloat(path_latlng_record[0], 64)
 		lng_raw, _ := strconv.ParseFloat(path_latlng_record[1], 64)
 
+		var corrected_coord common.Coordinate
+		// Keep as-is if Taipei, Macao, or Hong Kong
+		if city_code == "tb" || city_code == "am" || city_code == "hk" {
+			corrected_coord = common.Coordinate{
+				Lat: lat_raw,
+				Lng: lng_raw,
+			}
+		} else {
+			corrected_coord = s.ChinaHandler.GCJ02ToWGS84(common.Coordinate{
+				Lat: lat_raw,
+				Lng: lng_raw,
+			})
+		}
+
 		// Add a new coord
-		all_latlng_coords = append(all_latlng_coords, common.GCJ02ToWGS84(common.Coordinate{
-			Lat: lat_raw,
-			Lng: lng_raw,
-		}))
+		all_latlng_coords = append(all_latlng_coords, corrected_coord)
 	}
 
 	// Read in the mappings for line and stations to their indices (inclusive) in the list of coords

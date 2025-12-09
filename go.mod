@@ -13,6 +13,7 @@ require (
 	github.com/marcozac/go-jsonc v0.1.1 // indirect
 	github.com/modern-go/concurrent v0.0.0-20180228061459-e0a39a4cb421 // indirect
 	github.com/modern-go/reflect2 v1.0.2 // indirect
+	github.com/paulmach/orb v0.12.0 // indirect
 	golang.org/x/net v0.47.0 // indirect
 	golang.org/x/text v0.31.0 // indirect
 	honnef.co/go/spew v0.0.0-20160306144918-6a474d848f64 // indirect

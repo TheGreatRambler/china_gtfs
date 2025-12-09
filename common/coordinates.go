@@ -2,7 +2,12 @@ package common
 
 import (
 	"math"
+	"os"
 	"strings"
+
+	"github.com/paulmach/orb"
+	"github.com/paulmach/orb/geojson"
+	"github.com/paulmach/orb/planar"
 )
 
 // Define constants for geo types
@@ -325,18 +330,7 @@ func GCJ02Delta(lng, lat float64) (float64, float64) {
 	return d_lng, d_lat
 }
 
-// OutOfChina checks if the coordinates are outside China.
-func OutOfChina(lng, lat float64) bool {
-	if lng < 72.004 || lng > 137.8347 {
-		return true
-	}
-	if lat < 0.8293 || lat > 55.8271 {
-		return true
-	}
-	return false
-}
-
-// TransformLat performs the latitude transformation.
+// TransformLat performs the latitude transformation
 func TransformLat(x, y float64) float64 {
 	ret := -100.0 + 2.0*x + 3.0*y + 0.2*y*y + 0.1*x*y + 0.2*math.Sqrt(math.Abs(x))
 	ret += (20.0*math.Sin(6.0*x*math.Pi) + 20.0*math.Sin(2.0*x*math.Pi)) * 2.0 / 3.0
@@ -345,7 +339,7 @@ func TransformLat(x, y float64) float64 {
 	return ret
 }
 
-// TransformLon performs the longitude transformation.
+// TransformLon performs the longitude transformation
 func TransformLon(x, y float64) float64 {
 	ret := 300.0 + x + 2.0*y + 0.1*x*x + 0.1*x*y + 0.1*math.Sqrt(math.Abs(x))
 	ret += (20.0*math.Sin(6.0*x*math.Pi) + 20.0*math.Sin(2.0*x*math.Pi)) * 2.0 / 3.0
@@ -354,30 +348,69 @@ func TransformLon(x, y float64) float64 {
 	return ret
 }
 
-// ToWGS84 converts GCJ-02 to WGS-84.
-func GCJ02ToWGS84(coord Coordinate) Coordinate {
+type ChinaHandler struct {
+	Poly orb.MultiPolygon
+}
+
+func NewChinaHandler(filepath string) (*ChinaHandler, error) {
+	data, err := os.ReadFile(filepath)
+	if err != nil {
+		return nil, err
+	}
+
+	fc, err := geojson.UnmarshalFeatureCollection(data)
+	if err != nil {
+		return nil, err
+	}
+
+	var poly orb.MultiPolygon
+	for _, f := range fc.Features {
+		switch g := f.Geometry.(type) {
+		case orb.MultiPolygon:
+			poly = g
+		case orb.Polygon:
+			// Wrap single polygon into MultiPolygon
+			poly = orb.MultiPolygon{g}
+		}
+	}
+
+	return &ChinaHandler{
+		Poly: poly,
+	}, nil
+}
+
+func (s *ChinaHandler) IsWithinChina(lat float64, lng float64) bool {
+	return planar.MultiPolygonContains(s.Poly, orb.Point{lng, lat})
+}
+
+// ToWGS84 converts GCJ-02 to WGS-84
+func (s *ChinaHandler) GCJ02ToWGS84(coord Coordinate) Coordinate {
 	lng := coord.Lng
 	lat := coord.Lat
-	if !OutOfChina(lng, lat) {
-		d_lng, d_lat := GCJ02Delta(lng, lat)
-		lng = lng - d_lng
-		lat = lat - d_lat
-	}
+
+	//if s.IsWithinChina(lng, lat) {
+	d_lng, d_lat := GCJ02Delta(lng, lat)
+	lng = lng - d_lng
+	lat = lat - d_lat
+	//}
+
 	return Coordinate{
 		Lat: lat,
 		Lng: lng,
 	}
 }
 
-// FromWGS84 converts WGS-84 to GCJ-02.
-func GCJ02FromWGS84(coord Coordinate) Coordinate {
+// FromWGS84 converts WGS-84 to GCJ-02
+func (s *ChinaHandler) GCJ02FromWGS84(coord Coordinate) Coordinate {
 	lng := coord.Lng
 	lat := coord.Lat
-	if !OutOfChina(lng, lat) {
-		d_lng, d_lat := GCJ02Delta(lng, lat)
-		lng = lng + d_lng
-		lat = lat + d_lat
-	}
+
+	//if s.IsWithinChina(lng, lat) {
+	d_lng, d_lat := GCJ02Delta(lng, lat)
+	lng = lng + d_lng
+	lat = lat + d_lat
+	//}
+
 	return Coordinate{
 		Lat: lat,
 		Lng: lng,

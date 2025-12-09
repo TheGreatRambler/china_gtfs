@@ -1,5 +1,6 @@
 # More memory allocated than normal
 # as OpenTripPlanner uses a lot of memory during the build phase
+# If you run into memory exhausion issues use the jar directly
 OTP_HEAP_GB=16
 JAVA_MEM="-Xms${OTP_HEAP_GB}g -Xmx${OTP_HEAP_GB}g"
 
