@@ -2,7 +2,7 @@
 
 ![banner](./img/banner.png)
 
-GTFS feeds for various Chinese public transit agencies and modes, obtained from reverse engineering Chinese apps and implementing their file formats, routines, and network endpoints. Try querying 48 different Chinese cities on the public OpenTripPlanner instance at [tgrcode.com/china_gtfs/route/](https://tgrcode.com/china_gtfs/route/).
+GTFS feeds for various Chinese public transit agencies and modes, obtained from reverse engineering Chinese apps and implementing their file formats, routines, and network endpoints. Try querying 48 different Chinese cities and 6824 different metro stations on the public OpenTripPlanner instance at [tgrcode.com/china_gtfs/route/](https://tgrcode.com/china_gtfs/route/). For example try Beijing Airport to the Forbidden City or Shanghai Dishui Lake to Hongqiao Airport.
 
 # GTFS Files
 * agency.txt
