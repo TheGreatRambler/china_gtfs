@@ -2,7 +2,7 @@
 
 ![banner](./img/banner.png)
 
-GTFS feeds for various Chinese public transit agencies and modes, obtained from reverse engineering Chinese apps and implementing their file formats, routines, and network endpoints.
+GTFS feeds for various Chinese public transit agencies and modes, obtained from reverse engineering Chinese apps and implementing their file formats, routines, and network endpoints. Try querying 48 different Chinese cities on the public OpenTripPlanner instance at [tgrcode.com/china_gtfs/route/](https://tgrcode.com/china_gtfs/route/).
 
 # GTFS Files
 * agency.txt
