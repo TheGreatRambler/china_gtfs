@@ -8,5 +8,5 @@ docker run --rm \
   --memory="${OTP_HEAP_GB}g" --memory-swap="${OTP_HEAP_GB}g" \
   -e "JAVA_TOOL_OPTIONS=${JAVA_MEM}" \
   -v ./build:/var/opentripplanner \
-  docker.io/opentripplanner/opentripplanner:latest \
+  docker.io/opentripplanner/opentripplanner:2.8.1 \
   --build --save

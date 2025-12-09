@@ -1,4 +1,4 @@
-package metroman_client
+package common
 
 import (
 	"math"

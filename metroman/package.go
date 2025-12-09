@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"tgrcode.com/baidu_client"
+	"tgrcode.com/china_gtfs/common"
 )
 
 type MetromanServer struct {
@@ -85,7 +86,7 @@ type MetromanLine struct {
 
 	Stations []*MetromanStation
 	// Just a simple lookup table for paths between stations
-	StationPaths map[string][]Coordinate
+	StationPaths map[string][]common.Coordinate
 }
 
 type MetromanRoute struct {
@@ -148,32 +149,6 @@ func OrSchedules(schedules []MetromanSchedule) MetromanSchedule {
 	return out
 }
 */
-
-func ReadFileFromCSV(zip_reader *zip.Reader, name string) ([]byte, error) {
-	var chosen_file *zip.File
-	for _, file := range zip_reader.File {
-		if file.Name == name {
-			chosen_file = file
-			break
-		}
-	}
-
-	if chosen_file == nil {
-		return []byte{}, fmt.Errorf("could not find file %s in zip", name)
-	}
-
-	opened_file, err := chosen_file.Open()
-	if err != nil {
-		return nil, err
-	}
-
-	contents, err := io.ReadAll(opened_file)
-	if err != nil {
-		return nil, err
-	}
-
-	return contents, nil
-}
 
 func CreateServer() (*MetromanServer, error) {
 	// Download version.txt (without headers)
@@ -271,7 +246,7 @@ func LoadCity(zip_prefix string, payload []byte) (*MetromanCity, error) {
 	holidays := []MetromanDate{}
 
 	// Read in stations/lines first from uno.csv
-	uno_csv_contents, err := ReadFileFromCSV(payload_reader, fmt.Sprintf("%s/uno.csv", zip_prefix))
+	uno_csv_contents, err := common.ReadFileFromZip(payload_reader, fmt.Sprintf("%s/uno.csv", zip_prefix))
 	if err != nil {
 		return nil, fmt.Errorf("could not open uno.csv: %v", err)
 	}
@@ -289,7 +264,7 @@ func LoadCity(zip_prefix string, payload []byte) (*MetromanCity, error) {
 			subway_map_x, _ := strconv.ParseInt(uno_record[10], 10, 0)
 			subway_map_y, _ := strconv.ParseInt(uno_record[11], 10, 0)
 
-			corrected_coord := GCJ02ToWGS84(Coordinate{
+			corrected_coord := common.GCJ02ToWGS84(common.Coordinate{
 				Lat: lat_raw,
 				Lng: lng_raw,
 			})
@@ -327,7 +302,7 @@ func LoadCity(zip_prefix string, payload []byte) (*MetromanCity, error) {
 				ShortName:       uno_record[7],
 				Color:           uno_record[12],
 				Stations:        []*MetromanStation{},
-				StationPaths:    map[string][]Coordinate{},
+				StationPaths:    map[string][]common.Coordinate{},
 			}
 
 			lines = append(lines, &line)
@@ -350,7 +325,7 @@ func LoadCity(zip_prefix string, payload []byte) (*MetromanCity, error) {
 	}
 
 	// Read in stations in line from line.csv
-	line_csv_contents, err := ReadFileFromCSV(payload_reader, fmt.Sprintf("%s/line.csv", zip_prefix))
+	line_csv_contents, err := common.ReadFileFromZip(payload_reader, fmt.Sprintf("%s/line.csv", zip_prefix))
 	if err != nil {
 		return nil, fmt.Errorf("could not open line.csv: %v", err)
 	}
@@ -370,7 +345,7 @@ func LoadCity(zip_prefix string, payload []byte) (*MetromanCity, error) {
 	}
 
 	// Read in stations in line from way.csv (the "line.csv" of routes)
-	way_csv_contents, err := ReadFileFromCSV(payload_reader, fmt.Sprintf("%s/way.csv", zip_prefix))
+	way_csv_contents, err := common.ReadFileFromZip(payload_reader, fmt.Sprintf("%s/way.csv", zip_prefix))
 	if err != nil {
 		return nil, fmt.Errorf("could not open way.csv: %v", err)
 	}
@@ -412,7 +387,7 @@ func LoadCity(zip_prefix string, payload []byte) (*MetromanCity, error) {
 	//spew.Dump(lines_by_code["BJMLSD"])
 
 	// Read in stations/lines from fare.csv (and other files pulled in)
-	fare_csv_contents, err := ReadFileFromCSV(payload_reader, fmt.Sprintf("%s/fare.csv", zip_prefix))
+	fare_csv_contents, err := common.ReadFileFromZip(payload_reader, fmt.Sprintf("%s/fare.csv", zip_prefix))
 	if err != nil {
 		return nil, fmt.Errorf("could not open fare.csv: %v", err)
 	}
@@ -469,7 +444,7 @@ func LoadCity(zip_prefix string, payload []byte) (*MetromanCity, error) {
 	}
 
 	// Read in holidays
-	holiday_csv_contents, err := ReadFileFromCSV(payload_reader, fmt.Sprintf("%s/holiday.csv", zip_prefix))
+	holiday_csv_contents, err := common.ReadFileFromZip(payload_reader, fmt.Sprintf("%s/holiday.csv", zip_prefix))
 	if err != nil {
 		return nil, fmt.Errorf("could not open holiday.csv: %v", err)
 	}
@@ -493,7 +468,7 @@ func LoadCity(zip_prefix string, payload []byte) (*MetromanCity, error) {
 	schedule_def := make(map[string]*MetromanSchedule)
 
 	// Read in schedule definitions
-	schedule_csv_contents, err := ReadFileFromCSV(payload_reader, fmt.Sprintf("%s/schedule.csv", zip_prefix))
+	schedule_csv_contents, err := common.ReadFileFromZip(payload_reader, fmt.Sprintf("%s/schedule.csv", zip_prefix))
 	if err != nil {
 		return nil, fmt.Errorf("could not open schedule.csv: %v", err)
 	}
@@ -528,7 +503,7 @@ func LoadCity(zip_prefix string, payload []byte) (*MetromanCity, error) {
 	}
 
 	// Read in schedules for routes
-	wayschedule_csv_contents, err := ReadFileFromCSV(payload_reader, fmt.Sprintf("%s/wayschedule.csv", zip_prefix))
+	wayschedule_csv_contents, err := common.ReadFileFromZip(payload_reader, fmt.Sprintf("%s/wayschedule.csv", zip_prefix))
 	if err != nil {
 		return nil, fmt.Errorf("could not open wayschedule.csv: %v", err)
 	}
@@ -555,7 +530,7 @@ func LoadCity(zip_prefix string, payload []byte) (*MetromanCity, error) {
 		//}
 
 		// Read in visit times for route
-		schedule_csv_contents, err := ReadFileFromCSV(payload_reader, fmt.Sprintf("%s/%s.csv", zip_prefix, route.Code))
+		schedule_csv_contents, err := common.ReadFileFromZip(payload_reader, fmt.Sprintf("%s/%s.csv", zip_prefix, route.Code))
 		if err != nil {
 			// Some files like the walking routes don't exist, just ignore
 			continue
@@ -729,7 +704,7 @@ func LoadCity(zip_prefix string, payload []byte) (*MetromanCity, error) {
 	}
 
 	// Read in the coords for lines in their entirety
-	path_latlng_csv_contents, err := ReadFileFromCSV(payload_reader, fmt.Sprintf("%s/path_latlng.csv", zip_prefix))
+	path_latlng_csv_contents, err := common.ReadFileFromZip(payload_reader, fmt.Sprintf("%s/path_latlng.csv", zip_prefix))
 	if err != nil {
 		return nil, fmt.Errorf("could not open path_latlng.csv: %v", err)
 	}
@@ -737,7 +712,7 @@ func LoadCity(zip_prefix string, payload []byte) (*MetromanCity, error) {
 	// Read through the CSV
 	path_latlng_csv_lines := strings.Split(string(path_latlng_csv_contents), "\r\n")
 
-	all_latlng_coords := []Coordinate{}
+	all_latlng_coords := []common.Coordinate{}
 	for _, path_latlng_record_line := range path_latlng_csv_lines {
 		path_latlng_record := strings.Split(path_latlng_record_line, ",")
 
@@ -745,14 +720,14 @@ func LoadCity(zip_prefix string, payload []byte) (*MetromanCity, error) {
 		lng_raw, _ := strconv.ParseFloat(path_latlng_record[1], 64)
 
 		// Add a new coord
-		all_latlng_coords = append(all_latlng_coords, GCJ02ToWGS84(Coordinate{
+		all_latlng_coords = append(all_latlng_coords, common.GCJ02ToWGS84(common.Coordinate{
 			Lat: lat_raw,
 			Lng: lng_raw,
 		}))
 	}
 
 	// Read in the mappings for line and stations to their indices (inclusive) in the list of coords
-	path_rail_csv_contents, err := ReadFileFromCSV(payload_reader, fmt.Sprintf("%s/path_rail.csv", zip_prefix))
+	path_rail_csv_contents, err := common.ReadFileFromZip(payload_reader, fmt.Sprintf("%s/path_rail.csv", zip_prefix))
 	if err != nil {
 		return nil, fmt.Errorf("could not open path_rail.csv: %v", err)
 	}
@@ -770,7 +745,7 @@ func LoadCity(zip_prefix string, payload []byte) (*MetromanCity, error) {
 
 		_, exists := line.StationPaths[path_code]
 		if !exists {
-			line.StationPaths[path_code] = []Coordinate{}
+			line.StationPaths[path_code] = []common.Coordinate{}
 		}
 		// Set the coords
 		// TODO use a global list of coords and just index into it
@@ -799,7 +774,7 @@ func (s *MetromanServer) GetRawZip(code string) ([]byte, error) {
 }
 
 func CSVToMatrixInt(payload_reader *zip.Reader, filename string) ([][]int, error) {
-	matrix_csv_contents, err := ReadFileFromCSV(payload_reader, filename)
+	matrix_csv_contents, err := common.ReadFileFromZip(payload_reader, filename)
 	if err != nil {
 		return nil, err
 	}

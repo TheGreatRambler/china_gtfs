@@ -218,7 +218,7 @@ func startOtpContainer(ctx context.Context) (*exec.Cmd, error) {
 		"-p", "8080:8080",
 		"-v", "./build:/var/opentripplanner",
 		// pin to a specific OTP version if you like, e.g. v2.7.0
-		"docker.io/opentripplanner/opentripplanner:latest",
+		"docker.io/opentripplanner/opentripplanner:2.8.1",
 		"--load",
 		"--serve",
 	)
